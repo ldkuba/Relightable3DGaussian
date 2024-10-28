@@ -1,5 +1,6 @@
 #ifndef BVH_CONSTRUCT_CUH
 #define BVH_CONSTRUCT_CUH
+#include <cuda/functional>
 #include <thrust/swap.h>
 #include <thrust/pair.h>
 #include <thrust/tuple.h>
