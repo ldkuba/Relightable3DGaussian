@@ -23,7 +23,7 @@ from lpipsPyTorch import lpips
 from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
 
 
-def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, args, is_pbr=False):
+def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, is_pbr=False):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
@@ -136,7 +136,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
 
         with torch.no_grad():
             if pipe.save_training_vis:
-                save_training_vis(viewpoint_cam, gaussians, background, render_fn,
+                save_training_vis(args, viewpoint_cam, gaussians, background, render_fn,
                                   pipe, opt, first_iter, iteration, pbr_kwargs)
             # Progress bar
             pbar_dict = {"num": gaussians.get_xyz.shape[0]}
@@ -151,7 +151,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
             progress_bar.set_postfix(pbar_dict)
 
             # Log and save
-            training_report(tb_writer, iteration, tb_dict,
+            training_report(args, tb_writer, iteration, tb_dict,
                             scene, render_fn, pipe=pipe,
                             bg_color=background, dict_params=pbr_kwargs)
 
@@ -203,12 +203,12 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
                     print("[ITER {}] Saving {} Checkpoint".format(iteration, com_name))
 
     if dataset.eval:
-        eval_render(scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs)
+        eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs)
 
     return gaussians
 
 
-def training_report(tb_writer, iteration, tb_dict, scene: Scene, renderFunc, pipe,
+def training_report(args, tb_writer, iteration, tb_dict, scene: Scene, renderFunc, pipe,
                     bg_color: torch.Tensor, scaling_modifier=1.0, override_color=None,
                     opt: OptimizationParams = None, is_training=False, **kwargs):
     if tb_writer:
@@ -275,7 +275,7 @@ def training_report(tb_writer, iteration, tb_dict, scene: Scene, renderFunc, pip
         torch.cuda.empty_cache()
 
 
-def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt, first_iter, iteration, pbr_kwargs):
+def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pipe, opt, first_iter, iteration, pbr_kwargs):
     os.makedirs(os.path.join(args.model_path, "visualize"), exist_ok=True)
     with torch.no_grad():
         if iteration % pipe.save_training_vis_iteration == 0 or iteration == first_iter + 1:
@@ -318,7 +318,7 @@ def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt
             grid = F.interpolate(grid[None], (int(grid.shape[-2]/scale), int(grid.shape[-1]/scale)))[0]
             save_image(grid, os.path.join(args.model_path, "visualize", f"{iteration:06d}.png"))
 
-def eval_render(scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs):
+def eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs):
     psnr_test = 0.0
     ssim_test = 0.0
     lpips_test = 0.0
@@ -408,7 +408,7 @@ if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
     is_pbr = args.type in ['neilf']
-    training(lp.extract(args), op.extract(args), pp.extract(args), is_pbr=is_pbr)
+    training(args, lp.extract(args), op.extract(args), pp.extract(args), is_pbr=is_pbr)
 
     # All done
     print("\nTraining complete.")
