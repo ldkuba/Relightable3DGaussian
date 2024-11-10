@@ -23,7 +23,7 @@ from lpipsPyTorch import lpips
 from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
 
 
-def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, is_pbr=False):
+def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, args, is_pbr=False):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
@@ -204,6 +204,8 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
 
     if dataset.eval:
         eval_render(scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs)
+
+    return gaussians
 
 
 def training_report(tb_writer, iteration, tb_dict, scene: Scene, renderFunc, pipe,
