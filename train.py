@@ -23,7 +23,7 @@ from lpipsPyTorch import lpips
 from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
 
 
-def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, is_pbr=False):
+def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
@@ -50,7 +50,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     Setup PBR components
     """
     pbr_kwargs = dict()
-    if is_pbr:
+    if args.is_pbr:
         
         # first update visibility
         gaussians.update_visibility(pipe.sample_num)
@@ -108,7 +108,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
             gaussians.oneupSHdegree()
         
         # Every 1000 update visibility
-        # if is_pbr and iteration % 1000 == 0:
+        # if args.is_pbr and iteration % 1000 == 0:
         #     gaussians.update_visibility(pipe.sample_num)
 
         # Pick a random Camera
@@ -140,7 +140,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                                   pipe, opt, first_iter, iteration, pbr_kwargs)
             # Progress bar
             pbar_dict = {"num": gaussians.get_xyz.shape[0]}
-            if is_pbr:
+            if args.is_pbr:
                 pbar_dict["light_mean"] = direct_env_light.get_env.mean().item()
                 pbar_dict["env"] = direct_env_light.H
             for k in tb_dict:
@@ -292,7 +292,7 @@ def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pip
                 render_pkg["pseudo_normal"] * 0.5 + 0.5,
             ]
 
-            if is_pbr:
+            if args.is_pbr:
                 
                 H, W = render_pkg["pbr"].shape[1:]
                 env = F.interpolate(render_pkg['env'].permute(0, 3, 1, 2), (H, 2*W))
@@ -407,8 +407,8 @@ if __name__ == "__main__":
 
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
-    is_pbr = args.type in ['neilf']
-    training(args, lp.extract(args), op.extract(args), pp.extract(args), is_pbr=is_pbr)
+    args.is_pbr = args.type in ['neilf']
+    training(args, lp.extract(args), op.extract(args), pp.extract(args))
 
     # All done
     print("\nTraining complete.")
