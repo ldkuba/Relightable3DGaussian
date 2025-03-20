@@ -374,7 +374,7 @@ if __name__ == '__main__':
                 #     continue
 
                 transformed = np.matmul(extrinsic[i+1], [points3d[p3d_id].xyz[0], points3d[p3d_id].xyz[1], points3d[p3d_id].xyz[2], 1])
-                zs.append(np.asscalar(transformed[2]))
+                zs.append(transformed[2].item())
                 # zs.append(np.item(transformed[2]))
             zs_sorted = sorted(zs)
             # relaxed depth range

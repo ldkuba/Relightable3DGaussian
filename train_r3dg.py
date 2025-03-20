@@ -381,8 +381,7 @@ def eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kw
     print("\n[ITER {}] Evaluating {}: PSNR {} SSIM {} LPIPS {}".format(args.iterations, "test", psnr_test, ssim_test,
                                                                        lpips_test))
 
-
-if __name__ == "__main__":
+def main(args):
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)
@@ -397,7 +396,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_interval", type=int, default=5000)
     parser.add_argument("-c", "--checkpoint", type=str, default=None)
-    args = parser.parse_args(sys.argv[1:])
+    args = parser.parse_args(args)
     print(f"Current model path: {args.model_path}")
     print(f"Current rendering type:  {args.type}")
     print("Optimizing " + args.model_path)
@@ -405,10 +404,16 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
+    torch.set_default_device('cuda')
+
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
     args.is_pbr = args.type in ['neilf']
-    training(args, lp.extract(args), op.extract(args), pp.extract(args))
+    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args))
 
     # All done
     print("\nTraining complete.")
+    return gaussians
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
