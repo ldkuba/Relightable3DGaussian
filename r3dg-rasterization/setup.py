@@ -15,6 +15,20 @@ import os
 
 os.path.dirname(os.path.abspath(__file__))
 
+debug_mode = True
+
+extra_compile_args = {
+    "nvcc": ["-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/"),
+            "-O3" if not debug_mode else "-O0",],
+    "cxx": ["-O3" if not debug_mode else "-O0",]
+}
+extra_link_args = []
+
+if debug_mode:
+    extra_compile_args["nvcc"].append("-g")
+    extra_compile_args["cxx"].append("-Zl")
+    extra_link_args.extend(["-O0", "-Zl"])
+
 setup(
     name="r3dg_rasterization",
     packages=['r3dg_rasterization'],
@@ -27,10 +41,9 @@ setup(
                 "cuda_rasterizer/backward.cu",
                 "rasterize_points.cu",
                 "ext.cpp"],
-            extra_compile_args={
-                "nvcc": ["-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/"),
-                         "-O3"],
-                "cxx": ["-O3"]})
+            extra_compile_args=extra_compile_args,
+            extra_link_args=extra_link_args,
+        )
     ],
     cmdclass={
         'build_ext': BuildExtension
