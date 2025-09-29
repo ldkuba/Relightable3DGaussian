@@ -76,6 +76,12 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+    """ Prepare Diff-SPSR if enabled """
+    if args.diff_spsr:
+        import sdpsr
+        print("Using Diff-SPSR for reconstruction")
+        sdpsr_model = sdpsr.SDPSR(res=(10, 10, 10))
+
     """ GUI """
     windows = None
     if args.gui:
@@ -132,6 +138,17 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         # Loss
         tb_dict = render_pkg["tb_dict"]
         loss += render_pkg["loss"]
+
+        # Diff-SPSR
+        if args.diff_spsr:
+            sdf, variance = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
+
+            # Volumetric SDF rendering
+            depth_vol, normal_vol = sdpsr.render_volumetric_sdf(sdf, viewpoint_cam)
+            depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
+            loss += F.mse_loss(depth_vol, depth_gaussian).sum() * opt.lambda_vol_depth_render
+            loss += F.mse_loss(normal_vol, normal_gaussian).sum() * opt.lambda_vol_normal_render
+
         loss.backward()
 
         with torch.no_grad():
@@ -156,7 +173,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                             bg_color=background, dict_params=pbr_kwargs)
 
             # densification
-            
+            # TODO: Use variance to influence densification
             if iteration < opt.densify_until_iter:
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, 
                                                     render_pkg['weights'])
@@ -396,6 +413,11 @@ def main(args):
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_interval", type=int, default=5000)
     parser.add_argument("-c", "--checkpoint", type=str, default=None)
+
+    # Diff PSR args
+    parser.add_argument("--diff-spsr", action='store_true', default=False, help='use diff-spsr for reconstruction')
+    # ...other args...
+
     args = parser.parse_args(args)
     print(f"Current model path: {args.model_path}")
     print(f"Current rendering type:  {args.type}")
@@ -409,11 +431,15 @@ def main(args):
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
     args.is_pbr = args.type in ['neilf']
-    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args))
-
-    # All done
-    print("\nTraining complete.")
-    return gaussians
+    
+    if args.diff_spsr:
+        sdf = training(args, lp.extract(args), op.extract(args), pp.extract(args))
+        print("\nTraining complete.")
+        return sdf
+    else:
+        gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args))
+        print("\nTraining complete.")
+        return gaussians
 
 if __name__ == "__main__":
     main(sys.argv[1:])

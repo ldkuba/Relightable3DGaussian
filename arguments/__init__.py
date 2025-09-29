@@ -133,6 +133,10 @@ class OptimizationParams(ParamGroup):
         self.lambda_visibility = 0.0
         self.lambda_env_smooth = 0.0
 
+        # Diff PSR related parameters
+        self.lambda_vol_depth_render = 0.0
+        self.lambda_vol_normal_render = 0.0
+
         super().__init__(parser, "Optimization Parameters")
 
 
