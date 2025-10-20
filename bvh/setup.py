@@ -10,7 +10,7 @@ setup(
     ext_modules=[
         CUDAExtension(
             name='bvh_tracing._C',
-            sources=[os.path.join(_src_path, 'src', f) for f in [
+            sources=[os.path.join('src', f) for f in [
                 'bvh.cu',
                 'trace.cu',
                 'construct.cu',
@@ -25,6 +25,6 @@ setup(
         ),
     ],
     cmdclass={
-        'build_ext': BuildExtension,
+        'build_ext': BuildExtension.with_options(use_ninja=False),
     },
 )
