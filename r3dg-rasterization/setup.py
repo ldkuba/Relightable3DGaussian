@@ -12,6 +12,7 @@
 from setuptools import setup
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 import os
+import platform
 
 os.path.dirname(os.path.abspath(__file__))
 
@@ -26,8 +27,10 @@ extra_link_args = []
 
 if debug_mode:
     extra_compile_args["nvcc"].append("-g")
-    extra_compile_args["cxx"].append("-Zl")
-    extra_link_args.extend(["-O0", "-Zl"])
+    extra_link_args.extend(["-O0"])
+    if platform.system() == "Windows":
+        extra_compile_args["cxx"].append("-Zl")
+        extra_link_args.extend(["-Zl"])
 
 setup(
     name="r3dg_rasterization",
