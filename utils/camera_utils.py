@@ -53,7 +53,11 @@ def loadCam(args, id, cam_info, resolution_scale):
 
     resized_image_mask = None
     if cam_info.image_mask is not None:
-        image_mask = torch.from_numpy(cam_info.image_mask).float().permute(2, 0, 1)
+        torch_mask = torch.from_numpy(cam_info.image_mask).float()
+        if torch_mask.ndim == 2:
+            image_mask = torch_mask.unsqueeze(0)
+        else:
+            image_mask = torch_mask.permute(2, 0, 1)
         resized_image_mask = torchvision.transforms.Resize(
             resolution, interpolation=InterpolationMode.NEAREST)(image_mask)
 

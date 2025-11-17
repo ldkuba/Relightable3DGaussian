@@ -356,7 +356,7 @@ class GaussianModel:
         return gaussians
 
     def create_from_ckpt(self, checkpoint_path, restore_optimizer=False):
-        (model_args, first_iter) = torch.load(checkpoint_path)
+        (model_args, first_iter) = torch.load(checkpoint_path, weights_only=False)
 
         (self.active_sh_degree,
          self._xyz,
