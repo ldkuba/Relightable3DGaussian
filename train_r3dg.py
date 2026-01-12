@@ -78,9 +78,11 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
     """ Prepare Diff-SPSR if enabled """
     if args.diff_spsr:
-        import sdpsr
+        import sdpsr.sdpsr_approx as sdpsr
         print("Using Diff-SPSR for reconstruction")
-        sdpsr_model = sdpsr.SDPSR(res=(10, 10, 10))
+        sdpsr_model = sdpsr.SDPSRApprox(res=(128, 128, 128), sigma_cov=0.003, sampling_density_factor=0.7, compute_laplace=False)
+
+        torch.cuda.memory._record_memory_history()
 
     """ GUI """
     windows = None
@@ -103,6 +105,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     progress_bar = tqdm(range(first_iter + 1, opt.iterations + 1), desc="Training progress",
                         initial=first_iter, total=opt.iterations)
     
+    torch.autograd.set_detect_anomaly(True)
+
     for iteration in progress_bar:
         gaussians.update_learning_rate(iteration)
 
@@ -141,13 +145,17 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         # Diff-SPSR
         if args.diff_spsr:
-            sdf, variance = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
+            pass
+
+            if iteration % 10 == 0:
+                sdf, variance, _, _, _ = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
+                print("Num gaussians:", gaussians.get_xyz.shape)
 
             # Volumetric SDF rendering
-            depth_vol, normal_vol = sdpsr.render_volumetric_sdf(sdf, viewpoint_cam)
-            depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
-            loss += F.mse_loss(depth_vol, depth_gaussian).sum() * opt.lambda_vol_depth_render
-            loss += F.mse_loss(normal_vol, normal_gaussian).sum() * opt.lambda_vol_normal_render
+            # depth_vol, normal_vol = #TODO: where to put this func - render_volumetric_sdf(sdf, viewpoint_cam)
+            # depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
+            # loss += F.mse_loss(depth_vol, depth_gaussian).sum() * opt.lambda_vol_depth_render
+            # loss += F.mse_loss(normal_vol, normal_gaussian).sum() * opt.lambda_vol_normal_render
 
         loss.backward()
 
@@ -431,15 +439,10 @@ def main(args):
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
     args.is_pbr = args.type in ['neilf']
-    
-    if args.diff_spsr:
-        sdf = training(args, lp.extract(args), op.extract(args), pp.extract(args))
-        print("\nTraining complete.")
-        return sdf
-    else:
-        gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args))
-        print("\nTraining complete.")
-        return gaussians
+
+    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args))
+    print("\nTraining complete.")
+    return gaussians
 
 if __name__ == "__main__":
     main(sys.argv[1:])
