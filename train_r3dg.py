@@ -22,6 +22,7 @@ from torchvision.utils import save_image, make_grid
 from lpipsPyTorch import lpips
 from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
 
+import time
 
 def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams):
     first_iter = 0
@@ -80,15 +81,15 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if args.diff_spsr:
         import sdpsr.sdpsr_approx as sdpsr
         print("Using Diff-SPSR for reconstruction")
-        sdpsr_model = sdpsr.SDPSRApprox(res=(128, 128, 128), sigma_cov=0.003, sampling_density_factor=0.7, compute_laplace=False)
+        sdpsr_model = sdpsr.SDPSRApprox(res=(128, 128, 128), sigma_cov=0.003, sampling_density_factor=0.7, compute_laplace=False, compute_point_variance=False, mem_tag="pipeline_r3dg")
 
         import utils.render_sdf as render_sdf
-        sdf_renderer = render_sdf.SDFRenderer(n_samples=32, n_importance=32, up_sample_steps=2)
+        sdf_renderer = render_sdf.SDFRenderer(n_samples=64, n_importance=64, up_sample_steps=4)
 
         # Save camera stack for debugging
         torch.save(scene.getTrainCameras(), os.path.join(dataset.model_path, "train_cams.pth"))
 
-        # torch.cuda.memory._record_memory_history(stacks='all')
+        # torch.cuda.memory._record_memory_history()
 
     """ GUI """
     windows = None
@@ -151,35 +152,28 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         # Diff-SPSR
         if args.diff_spsr:
-            if iteration % 10 == 0:
-                # TODO: Normalize, like in util
-                sdf, variance, sdf_spacing, sdf_corner, _ = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
-                # TODO: Un-normalize sdf_corner and spacing
+            # SDPSR
+            sdf, variance, sdf_spacing, sdf_corner = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
 
-                # Volumetric SDF rendering
-                # TODO: Sample n rays instead of all pixels (maybe importance sample?)
-                depth_sdf, normal_sdf = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False)
-                depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
-                loss += F.mse_loss(depth_sdf.unsqueeze(0), depth_gaussian).sum() * opt.lambda_vol_depth_render
-                loss += F.mse_loss(normal_sdf.permute(2, 0, 1), normal_gaussian).sum() * opt.lambda_vol_normal_render
+            # Volumetric SDF rendering
+            depth_sdf, normal_sdf, ray_mask = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
+            depth_sdf = depth_sdf[ray_mask].unsqueeze(-1)
+            normal_sdf = normal_sdf[ray_mask]
 
-                # if iteration % 500 == 0:
-                #     from PIL import Image
-                #     img = render_pkg["depth"].squeeze(0).cpu().detach()
-                #     img = (img / torch.max(img)) * 255.0
-                #     img = img.numpy()
-                #     image = Image.fromarray(img.astype(np.uint8))
-                #     image.show()
+            # Rendered gaussians
+            depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
+            selected_depth_gaussian = depth_gaussian.flatten(1, -1).permute(1, 0)[ray_mask]
+            selected_normal_gaussian = normal_gaussian.flatten(1, -1).permute(1, 0)[ray_mask]
 
-                #     img2 = depth_sdf.cpu().detach().numpy()
-                #     img2 = img2 * 255.0
-                #     image2 = Image.fromarray(img2.astype(np.uint8))
-                #     image2.show()
+            normal_dot = (normal_sdf * selected_normal_gaussian).sum(dim=-1)
+
+            loss_depth = F.mse_loss(depth_sdf, selected_depth_gaussian, reduction='sum')
+            loss_normal = F.l1_loss(normal_sdf, selected_normal_gaussian, reduction='sum') + F.l1_loss(torch.ones_like(normal_dot), normal_dot, reduction='sum')
+
+            loss += loss_depth * opt.lambda_vol_depth_render
+            loss += loss_normal * opt.lambda_vol_normal_render
 
         loss.backward()
-
-        # if iteration % 10 == 0:
-        #     torch.cuda.memory._dump_snapshot("debug_artifacts/pipeline_r3dg/memory_snapshot_iter_" + str(iteration) + ".pickle")
 
         with torch.no_grad():
             if pipe.save_training_vis:
