@@ -28,7 +28,7 @@ from on_the_fly import OnTheFly
 
 import time
 
-def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams):
+def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, wandb_run=None):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
@@ -88,7 +88,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if args.diff_spsr:
         import sdpsr.sdpsr_approx as sdpsr
         print("Using Diff-SPSR for reconstruction")
-        sdpsr_model = sdpsr.SDPSRApprox(res=(128, 128, 128), sigma_cov=0.003, sampling_density_factor=0.7, compute_laplace=False, compute_point_variance=False, mem_tag="pipeline_r3dg")
+        sdpsr_model = sdpsr.SDPSRApprox(res=(128, 128, 128), sigma_cov=0.003, sampling_density_factor=0.7, compute_laplace=False, compute_point_variance=False)
 
         import utils.render_sdf as render_sdf
         sdf_renderer = render_sdf.SDFRenderer(n_samples=64, n_importance=64, up_sample_steps=4)
@@ -159,26 +159,35 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         # Diff-SPSR
         if args.diff_spsr:
-            # SDPSR
-            sdf, variance, sdf_spacing, sdf_corner = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
+                
+            if iteration > 10000:
+                # SDPSR
+                sdf, variance, sdf_spacing, sdf_corner = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
 
-            # Volumetric SDF rendering
-            depth_sdf, normal_sdf, ray_mask = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
-            depth_sdf = depth_sdf[ray_mask].unsqueeze(-1)
-            normal_sdf = normal_sdf[ray_mask]
+                # Volumetric SDF rendering
+                depth_sdf, normal_sdf, ray_mask = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
+                depth_sdf = depth_sdf[ray_mask].unsqueeze(-1)
+                normal_sdf = normal_sdf[ray_mask]
 
-            # Rendered gaussians
-            depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
-            selected_depth_gaussian = depth_gaussian.flatten(1, -1).permute(1, 0)[ray_mask]
-            selected_normal_gaussian = normal_gaussian.flatten(1, -1).permute(1, 0)[ray_mask]
+                # Rendered gaussians
+                depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
+                selected_depth_gaussian = depth_gaussian.flatten(1, -1).permute(1, 0)[ray_mask]
+                selected_normal_gaussian = normal_gaussian.flatten(1, -1).permute(1, 0)[ray_mask]
 
-            normal_dot = (normal_sdf * selected_normal_gaussian).sum(dim=-1)
+                normal_dot = (normal_sdf * selected_normal_gaussian).sum(dim=-1)
 
-            loss_depth = F.mse_loss(depth_sdf, selected_depth_gaussian, reduction='sum')
-            loss_normal = F.l1_loss(normal_sdf, selected_normal_gaussian, reduction='sum') + F.l1_loss(torch.ones_like(normal_dot), normal_dot, reduction='sum')
+                loss_depth = F.mse_loss(depth_sdf, selected_depth_gaussian, reduction='sum')
+                loss_normal = F.l1_loss(normal_sdf, selected_normal_gaussian, reduction='sum') + F.l1_loss(torch.ones_like(normal_dot), normal_dot, reduction='sum')
 
-            loss += loss_depth * opt.lambda_vol_depth_render
-            loss += loss_normal * opt.lambda_vol_normal_render
+                loss += loss_depth * opt.lambda_vol_depth_render
+                loss += loss_normal * opt.lambda_vol_normal_render
+
+        if wandb_run is not None:
+            wandb_run.log({
+                "loss_total": loss.item(),
+                "loss_depth_sdf": loss_depth.item() if args.diff_spsr else 0,
+                "loss_normal_sdf": loss_normal.item() if args.diff_spsr else 0,
+            }, step=iteration)
 
         loss.backward()
 
@@ -436,7 +445,7 @@ def eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kw
     print("\n[ITER {}] Evaluating {}: PSNR {} SSIM {} LPIPS {}".format(args.iterations, "test", psnr_test, ssim_test,
                                                                        lpips_test))
 
-def main(args):
+def main(args, wandb_run=None):
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)
@@ -470,7 +479,7 @@ def main(args):
 
     args.is_pbr = args.type in ['neilf']
 
-    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args))
+    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args), wandb_run=wandb_run)
     print("\nTraining complete.")
     return gaussians
 
