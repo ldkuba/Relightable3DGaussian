@@ -26,6 +26,7 @@ from lpipsPyTorch import lpips
 from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
 from on_the_fly import OnTheFly
 
+import time
 
 def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams):
     first_iter = 0
@@ -87,9 +88,15 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if args.diff_spsr:
         import sdpsr.sdpsr_approx as sdpsr
         print("Using Diff-SPSR for reconstruction")
-        sdpsr_model = sdpsr.SDPSRApprox(res=(128, 128, 128), sigma_cov=0.003, sampling_density_factor=0.7, compute_laplace=False)
+        sdpsr_model = sdpsr.SDPSRApprox(res=(128, 128, 128), sigma_cov=0.003, sampling_density_factor=0.7, compute_laplace=False, compute_point_variance=False, mem_tag="pipeline_r3dg")
 
-        torch.cuda.memory._record_memory_history()
+        import utils.render_sdf as render_sdf
+        sdf_renderer = render_sdf.SDFRenderer(n_samples=64, n_importance=64, up_sample_steps=4)
+
+        # Save camera stack for debugging
+        torch.save(scene.getTrainCameras(), os.path.join(dataset.model_path, "train_cams.pth"))
+
+        # torch.cuda.memory._record_memory_history()
 
     """ GUI """
     windows = None
@@ -152,17 +159,26 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         # Diff-SPSR
         if args.diff_spsr:
-            pass
-
-            if iteration % 10 == 0:
-                sdf, variance, _, _, _ = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
-                print("Num gaussians:", gaussians.get_xyz.shape)
+            # SDPSR
+            sdf, variance, sdf_spacing, sdf_corner = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
 
             # Volumetric SDF rendering
-            # depth_vol, normal_vol = #TODO: where to put this func - render_volumetric_sdf(sdf, viewpoint_cam)
-            # depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
-            # loss += F.mse_loss(depth_vol, depth_gaussian).sum() * opt.lambda_vol_depth_render
-            # loss += F.mse_loss(normal_vol, normal_gaussian).sum() * opt.lambda_vol_normal_render
+            depth_sdf, normal_sdf, ray_mask = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
+            depth_sdf = depth_sdf[ray_mask].unsqueeze(-1)
+            normal_sdf = normal_sdf[ray_mask]
+
+            # Rendered gaussians
+            depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
+            selected_depth_gaussian = depth_gaussian.flatten(1, -1).permute(1, 0)[ray_mask]
+            selected_normal_gaussian = normal_gaussian.flatten(1, -1).permute(1, 0)[ray_mask]
+
+            normal_dot = (normal_sdf * selected_normal_gaussian).sum(dim=-1)
+
+            loss_depth = F.mse_loss(depth_sdf, selected_depth_gaussian, reduction='sum')
+            loss_normal = F.l1_loss(normal_sdf, selected_normal_gaussian, reduction='sum') + F.l1_loss(torch.ones_like(normal_dot), normal_dot, reduction='sum')
+
+            loss += loss_depth * opt.lambda_vol_depth_render
+            loss += loss_normal * opt.lambda_vol_normal_render
 
         loss.backward()
 
