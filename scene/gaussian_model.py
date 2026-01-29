@@ -887,6 +887,13 @@ class GaussianModel:
 
         self.densification_postfix(*args)
 
+    def add_on_the_fly_gaussians(self, gaussian_batch):
+        self.densification_postfix(
+            gaussian_batch.means, gaussian_batch.normals, gaussian_batch.shs_dc, gaussian_batch.shs_rest,
+            gaussian_batch.opacities, gaussian_batch.scales, gaussian_batch.rotations
+        )
+
+
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, max_grad_normal, weights_threshold=1e-4):
         # print(self.xyz_gradient_accum.shape)
         grads = self.xyz_gradient_accum / self.denom

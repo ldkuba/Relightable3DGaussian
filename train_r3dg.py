@@ -5,6 +5,9 @@ import torch.nn.functional as F
 import torchvision
 from collections import defaultdict
 from random import randint
+
+from PIL import Image
+
 from utils.loss_utils import ssim
 from gaussian_renderer import render_fn_dict
 import sys
@@ -21,6 +24,7 @@ from utils.graphics_utils import rgb_to_srgb
 from torchvision.utils import save_image, make_grid
 from lpipsPyTorch import lpips
 from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
+from on_the_fly import OnTheFly
 
 
 def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams):
@@ -45,6 +49,9 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         gaussians.create_from_pcd(scene.scene_info.point_cloud, scene.cameras_extent)
 
     gaussians.training_setup(opt)
+
+    tmp = scene.getTrainCameras()[0]
+    on_the_fly_obj = OnTheFly(tmp.image_width, tmp.image_height, dataset.sh_degree)
 
     """
     Setup PBR components
@@ -198,7 +205,14 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 if iteration % opt.opacity_reset_interval == 0 or (
                         dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
-                    
+
+            if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
+                prob_mask = on_the_fly_obj.create_prob_map(viewpoint_cam.original_image)
+                depth_mask = on_the_fly_obj.generate_depth_map(viewpoint_cam.original_image)
+                gaussian_batch = on_the_fly_obj.generate_gaussians(prob_mask, depth_mask, viewpoint_cam)
+
+                gaussians.add_on_the_fly_gaussians(gaussian_batch)
+
             # Optimizer step
             gaussians.step()
             for component in pbr_kwargs.values():

@@ -66,6 +66,7 @@ class PipelineParams(ParamGroup):
         self.debug = False
         self.save_training_vis = False
         self.save_training_vis_iteration = 1000
+        self.on_the_fly = False
         super().__init__(parser, "Pipeline Parameters")
 
 
