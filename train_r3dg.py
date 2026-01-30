@@ -178,8 +178,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         if wandb_run is not None:
             wandb_run.log({
                 "loss_total": loss.item(),
-                "loss_depth_sdf": loss_depth.item() if args.diff_spsr else 0,
-                "loss_normal_sdf": loss_normal.item() if args.diff_spsr else 0,
+                "loss_depth_sdf": loss_depth.item() * opt.lambda_vol_depth_render if args.diff_spsr and iteration > 10_000 else 0,
+                "loss_normal_sdf": loss_normal.item() * opt.lambda_vol_normal_render if args.diff_spsr and iteration > 10_000 else 0,
             }, step=iteration)
 
         loss.backward()
