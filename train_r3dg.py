@@ -22,6 +22,10 @@ from torchvision.utils import save_image, make_grid
 from lpipsPyTorch import lpips
 from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
 
+import wandb
+
+import visualization.visualize_covariance as vis_cov
+
 import time
 
 def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, wandb_run=None):
@@ -89,7 +93,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         # Save camera stack for debugging
         torch.save(scene.getTrainCameras(), os.path.join(dataset.model_path, "train_cams.pth"))
 
-        # torch.cuda.memory._record_memory_history()
+        diff_spsr_start_iteration = 10000
 
     """ GUI """
     windows = None
@@ -152,15 +156,25 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         # Diff-SPSR
         if args.diff_spsr:
-                
-            if iteration > 10000:
+            if iteration > diff_spsr_start_iteration:
                 # SDPSR
                 sdf, variance, sdf_spacing, sdf_corner = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
+                sdf.retain_grad()
+
+                # vis = vis_cov.VisualizationWriter(torch.tensor([128, 128, 128]), sdf_spacing, sdf_corner)
+                # vis.add_variance(sdf.flatten(), "mean", use_colors=True)
+                # vis.add_variance(variance.flatten(), "variance", use_colors=True)
+                # vis_file = f"debug_artifacts/pipeline_r3dg/sdpsr_scalar_mean_{iteration}.pt"
+                # vis.save(vis_file)
 
                 # Volumetric SDF rendering
                 depth_sdf, normal_sdf, ray_mask = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
                 depth_sdf = depth_sdf[ray_mask].unsqueeze(-1)
                 normal_sdf = normal_sdf[ray_mask]
+                normal_sdf = normal_sdf / (torch.norm(normal_sdf, dim=-1, keepdim=True) + 1e-6)
+                # depth_sdf, normal_sdf = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False)
+                depth_sdf.retain_grad()
+                normal_sdf.retain_grad()
 
                 # Rendered gaussians
                 depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
@@ -172,17 +186,49 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 loss_depth = F.mse_loss(depth_sdf, selected_depth_gaussian, reduction='sum')
                 loss_normal = F.l1_loss(normal_sdf, selected_normal_gaussian, reduction='sum') + F.l1_loss(torch.ones_like(normal_dot), normal_dot, reduction='sum')
 
+                # from PIL import Image
+                # depth_sdf = depth_sdf.cpu().detach().clip(min=0.0, max=10.0)
+                # # depth = depth.max() - depth
+                # depth_sdf_image = depth_sdf.numpy()
+                # depth_sdf_image = (depth_sdf_image - depth_sdf_image.min()) / (depth_sdf_image.max() - depth_sdf_image.min()) * 255.0
+                # depth_sdf_image = Image.fromarray(depth_sdf_image.astype(np.uint8))
+                # depth_sdf_image.save("./debug_artifacts/pipeline_r3dg/sdpsr_depth_sdf_iter_{}.png".format(iteration))
+                # # depth_sdf_image.show()
+
+                # depth_gaussian = depth_gaussian.reshape(200, 200).cpu().detach().clip(min=0.0, max=10.0)
+                # depth_gaussian_image = depth_gaussian.numpy()
+                # depth_gaussian_image = (depth_gaussian_image - depth_gaussian_image.min()) / (depth_gaussian_image.max() - depth_gaussian_image.min()) * 255.0
+                # depth_gaussian_image = Image.fromarray(depth_gaussian_image.astype(np.uint8))
+                # depth_gaussian_image.save("./debug_artifacts/pipeline_r3dg/sdpsr_depth_gaussian_iter_{}.png".format(iteration))
+                # # depth_gaussian_image.show()
+
+                # normal_sdf = normal_sdf.cpu().detach()
+                # normal_sdf_image = (normal_sdf.numpy() + 1.0) / 2.0 * 255.0
+                # normal_sdf_image = Image.fromarray(normal_sdf_image.astype(np.uint8))
+                # normal_sdf_image.save("./debug_artifacts/pipeline_r3dg/sdpsr_normal_sdf_iter_{}.png".format(iteration))
+                # # normal_sdf_image.show()
+
+                # normal_gaussian = normal_gaussian.permute(1, 2, 0).cpu().detach()
+                # normal_gaussian_image = (normal_gaussian.numpy() + 1.0) / 2.0 * 255.0
+                # normal_gaussian_image = Image.fromarray(normal_gaussian_image.astype(np.uint8))
+                # normal_gaussian_image.save("./debug_artifacts/pipeline_r3dg/sdpsr_normal_gaussian_iter_{}.png".format(iteration))
+                # normal_gaussian_image.show()
+
                 loss += loss_depth * opt.lambda_vol_depth_render
                 loss += loss_normal * opt.lambda_vol_normal_render
+
+        loss.backward()
 
         if wandb_run is not None:
             wandb_run.log({
                 "loss_total": loss.item(),
-                "loss_depth_sdf": loss_depth.item() * opt.lambda_vol_depth_render if args.diff_spsr and iteration > 10_000 else 0,
-                "loss_normal_sdf": loss_normal.item() * opt.lambda_vol_normal_render if args.diff_spsr and iteration > 10_000 else 0,
+                "loss_depth_sdf": loss_depth.item() * opt.lambda_vol_depth_render if args.diff_spsr and iteration > diff_spsr_start_iteration else 0,
+                "loss_normal_sdf": loss_normal.item() * opt.lambda_vol_normal_render if args.diff_spsr and iteration > diff_spsr_start_iteration else 0,
+                "psnr": tb_dict["psnr"],
+                "sdf_grad": wandb.Histogram(sdf.grad.cpu().numpy()) if args.diff_spsr and iteration > diff_spsr_start_iteration and iteration % 100 == 0 and sdf.grad is not None else None,
+                "sdf_depth_grad": wandb.Histogram(depth_sdf.grad.cpu().numpy()) if args.diff_spsr and iteration > diff_spsr_start_iteration and iteration % 100 == 0 and depth_sdf.grad is not None else None,
+                "sdf_normal_grad": wandb.Histogram(normal_sdf.grad.cpu().numpy()) if args.diff_spsr and iteration > diff_spsr_start_iteration and iteration % 100 == 0 and normal_sdf.grad is not None else None,
             }, step=iteration)
-
-        loss.backward()
 
         with torch.no_grad():
             if pipe.save_training_vis:
