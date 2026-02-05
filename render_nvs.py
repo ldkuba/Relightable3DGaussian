@@ -68,12 +68,15 @@ class GaussianRendererWrapper:
 
     @torch.no_grad()
     def render(self, views):
-        render_results = []
-        for view in tqdm(views, desc="Rendering progress"):
-            results = self.render_fn(view, self.gaussians, self.pipeline, self.background, dict_params=self.pbr_kwargs)
-            render_results.append(results)
+        if hasattr(views, '__iter__'):
+            render_results = []
+            for view in tqdm(views, desc="Rendering progress"):
+                results = self.render_fn(view, self.gaussians, self.pipeline, self.background, dict_params=self.pbr_kwargs)
+                render_results.append(results)
 
-        return render_results
+            return render_results
+        else:
+            return self.render_fn(views, self.gaussians, self.pipeline, self.background, dict_params=self.pbr_kwargs)
 
     def get_cameras(self, type='train'):
         if type == 'train':
