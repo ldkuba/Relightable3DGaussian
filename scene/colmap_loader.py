@@ -134,6 +134,30 @@ def read_points3D_binary(path_to_model_file):
             errors[p_id] = error
     return xyzs, rgbs, errors
 
+def read_indexed_points3d_binary(path_to_model_file):
+    """
+    copied and adjusted read_points3D_binary, to include point indices
+    """
+
+    with open(path_to_model_file, "rb") as fid:
+        num_points = read_next_bytes(fid, 8, "Q")[0]
+
+        id_to_xyz = (np.full((num_points, 1), np.nan), np.full((num_points, 3), np.nan))
+
+        for p_id in range(num_points):
+            binary_point_line_properties = read_next_bytes(
+                fid, num_bytes=43, format_char_sequence="QdddBBBd")
+            id = np.array(binary_point_line_properties[0])
+            xyz = np.array(binary_point_line_properties[1:4])
+            track_length = read_next_bytes(
+                fid, num_bytes=8, format_char_sequence="Q")[0]
+            track_elems = read_next_bytes(
+                fid, num_bytes=8 * track_length,
+                format_char_sequence="ii" * track_length)
+            id_to_xyz[0][p_id] = id
+            id_to_xyz[1][p_id] = xyz
+    return id_to_xyz
+
 
 def read_intrinsics_text(path):
     """

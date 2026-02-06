@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 from typing import NamedTuple
@@ -36,11 +37,18 @@ class GaussianBatch(NamedTuple):
 
 class OnTheFly:
 
-    def __init__(self, width, height, max_sh_degree, prob_scale = 1.0):
+    def __init__(self, width, height, max_sh_degree, pcd, scene_info = None, prob_scale = 1.0, bg = 0.0):
+        self.DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+
         self.width = width
         self.height = height
         self.prob_scale = prob_scale
         self.max_sh_degree = max_sh_degree
+        self.bg = bg
+        self.xyz = torch.from_numpy(pcd.points).to(self.DEVICE)
+        self.scene_info = scene_info
+
+        print("pcd.shape: ", self.xyz.shape)
 
         ## Initialize helpers for Gaussian initialization
         radius = 3
@@ -55,7 +63,6 @@ class OnTheFly:
 
         # for depth map
 
-        self.DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
         model_configs = {
             'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
@@ -110,6 +117,10 @@ class OnTheFly:
 
         return torch.from_numpy(depth).to(img.device)
 
+    def generate_mask(self, img):
+        return img != self.bg
+
+
     @torch.no_grad()
     def generate_gaussians(self, prob_mask, depth_mask, cam):
         c2w = torch.linalg.inv(cam.proj_matrix)
@@ -124,6 +135,13 @@ class OnTheFly:
         c2w = c2w.transpose(0, 1)
         world_points = coords @ c2w
         world_points = world_points[:,:3]
+
+#        self.project(cam)
+#
+#        with open(os.path.expanduser("~/shared/assets/world.npy"), "wb") as f:
+#            np.save(f, coords[:,:3].detach().cpu().numpy())
+#
+#        sys.exit(0)
 
         # ++ scales ++
         dist2 = torch.clamp_min(distCUDA2(world_points), 0.0000001)
@@ -174,3 +192,36 @@ class OnTheFly:
             return False
         self.camera_processed.add(uid)
         return True
+
+    def adjust_depth_map(self, viewpoint_cam, depth_map):
+        id_to_xyz = self.scene_info.colmap_point_cloud
+        key_points = self.scene_info.key_points.get(f'{viewpoint_cam.image_name}.png')
+
+        id3d = id_to_xyz[0]
+        id2d = key_points[0]
+
+        _, m3d, m2d = np.intersect1d(id3d, id2d, return_indices=True)
+
+        xys = key_points[1][m2d, :]
+        xyzs = id_to_xyz[1][m3d, :]
+
+        pixel = np.floor(xys).astype(np.int32)
+        depth = depth_map[pixel[:,1], pixel[:,0]].detach().cpu().numpy()
+        xyzs_transformed = (np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.proj_matrix.T.detach().cpu().numpy())
+#        dist = np.linalg.norm(xyzs_transformed, axis=1)
+        dist = xyzs_transformed[:,2]
+        model = np.stack((depth, dist), axis=1)
+        ratios = model[:,0] / model[:, 1]
+#        print("ratios: ", ratios)
+        s = np.median(ratios)
+        return s / depth_map
+
+    def add_gaussians(self, gaussians, viewpoint_cam):
+        prob_mask = self.create_prob_map(viewpoint_cam.original_image)
+        depth_mask = self.generate_depth_map(viewpoint_cam.original_image)
+        if self.scene_info is not None:
+            depth_mask = self.adjust_depth_map(viewpoint_cam, depth_mask)
+        gaussian_batch = self.generate_gaussians(prob_mask, depth_mask, viewpoint_cam)
+
+        gaussians.add_on_the_fly_gaussians(gaussian_batch)
+

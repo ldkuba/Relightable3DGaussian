@@ -46,13 +46,14 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                                         "point_cloud",
                                         "iteration_" + str(scene.loaded_iter),
                                         "point_cloud.ply"))
-    else:
-        gaussians.create_from_pcd(scene.scene_info.point_cloud, scene.cameras_extent)
+#    else:
+#        gaussians.create_from_pcd(scene.scene_info.point_cloud, scene.cameras_extent)
 
     gaussians.training_setup(opt)
 
     tmp = scene.getTrainCameras()[0]
-    on_the_fly_obj = OnTheFly(tmp.image_width, tmp.image_height, dataset.sh_degree)
+    on_the_fly_obj = OnTheFly(tmp.image_width, tmp.image_height, dataset.sh_degree,
+                              scene.scene_info.point_cloud, scene.scene_info)
 
     """
     Setup PBR components
@@ -120,6 +121,18 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                         initial=first_iter, total=opt.iterations)
     
     torch.autograd.set_detect_anomaly(True)
+
+    initial_progb = tqdm(range(0, len(scene.getTrainCameras())), desc="Initial gaussian spawning",
+                         initial=0, total=len(scene.getTrainCameras()))
+
+    if pipe.on_the_fly:
+        print("##### RUN ON THE FLY GAUSSIAN SPAWNING #####")
+        viewpoint_stack_on_the_fly = scene.getTrainCameras().copy()
+        for iter in initial_progb:
+            viewpoint_cam = viewpoint_stack_on_the_fly.pop()
+            if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
+                on_the_fly_obj.add_gaussians(gaussians, viewpoint_cam)
+            print("num: ", gaussians.get_xyz.shape[0])
 
     for iteration in progress_bar:
         gaussians.update_learning_rate(iteration)
@@ -231,12 +244,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                         dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
-            if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
-                prob_mask = on_the_fly_obj.create_prob_map(viewpoint_cam.original_image)
-                depth_mask = on_the_fly_obj.generate_depth_map(viewpoint_cam.original_image)
-                gaussian_batch = on_the_fly_obj.generate_gaussians(prob_mask, depth_mask, viewpoint_cam)
-
-                gaussians.add_on_the_fly_gaussians(gaussian_batch)
+#            if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
+#                on_the_fly_obj.add_gaussians(gaussians, viewpoint_cam)
 
             # Optimizer step
             gaussians.step()
@@ -342,7 +351,7 @@ def training_report(args, tb_writer, iteration, tb_dict, scene: Scene, renderFun
 def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pipe, opt, first_iter, iteration, pbr_kwargs):
     os.makedirs(os.path.join(args.model_path, "visualize"), exist_ok=True)
     with torch.no_grad():
-        if iteration % pipe.save_training_vis_iteration == 0 or iteration == first_iter + 1:
+        if True:
             render_pkg = render_fn(viewpoint_cam, gaussians, pipe, background,
                                    opt=opt, is_training=False, dict_params=pbr_kwargs)
 

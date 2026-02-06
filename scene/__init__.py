@@ -18,6 +18,18 @@ from scene.gaussian_model import GaussianModel
 from utils.system_utils import searchForMaxIteration
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
+from external.Relightable3DGaussian.scene.dataset_readers import SceneInfo
+
+
+def set_key_points(scene_info, key_points, colmap_point_cloud):
+    return SceneInfo(point_cloud=scene_info.point_cloud,
+                     train_cameras=scene_info.train_cameras,
+                     test_cameras=scene_info.test_cameras,
+                     nerf_normalization=scene_info.nerf_normalization,
+                     ply_path=scene_info.ply_path,
+                     key_points=key_points,
+                     colmap_point_cloud=colmap_point_cloud)
+
 
 class Scene:
     gaussians: GaussianModel
@@ -56,6 +68,13 @@ class Scene:
                 print("Found transforms_train.json file, assuming Blender data set!")
                 scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, 
                                                                debug=args.debug_cuda)
+                if os.path.exists(os.path.join(args.source_path, "colmap")):
+                    print("Found additional colmap data!")
+                    extrinsics_path = os.path.join(args.source_path, "colmap/sparse/0/")
+                    colmap_point_cloud, colmap_key_features = sceneLoadTypeCallbacks["AdditionalColmap"](extrinsics_path)
+                    scene_info = set_key_points(scene_info, colmap_key_features, colmap_point_cloud)
+                    print("loaded add colmap data")
+
         elif os.path.exists(os.path.join(args.source_path, "inputs/sfm_scene.json")):
             print("Found sfm_scene.json file, assuming NeILF data set!")
             scene_info = sceneLoadTypeCallbacks["NeILF"](args.source_path, args.white_background, args.eval,

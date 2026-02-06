@@ -6,7 +6,8 @@ import numpy as np
 
 from typing import NamedTuple
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
-    read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
+    read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text, \
+    read_indexed_points3d_binary
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 from pathlib import Path
 from plyfile import PlyData, PlyElement
@@ -41,6 +42,8 @@ class SceneInfo(NamedTuple):
     test_cameras: list
     nerf_normalization: dict
     ply_path: str
+    key_points: dict = None
+    colmap_point_cloud: any = None
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
@@ -604,10 +607,27 @@ def readSynthetic4RelightInfo(path, white_background, eval, debug=False):
 
     return scene_info
 
+
+def get_colmap_keypoints(base_path):
+    id_to_xyz = read_indexed_points3d_binary(os.path.join(base_path, "points3D.bin"))
+    images = read_extrinsics_binary(os.path.join(base_path, "images.bin")).values()
+
+    a = {}
+    for img in images:
+        pids = img.point3D_ids
+        xys = img.xys[pids != -1]
+        pids = pids[pids != -1]
+
+        a[img.name] = (pids, xys)
+
+    return id_to_xyz, a
+
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender": readNerfSyntheticInfo,
     "Synthetic4Relight": readSynthetic4RelightInfo,
     "NeILF": readNeILFInfo,
     "StanfordORB": readStanfordORBInfo,
+    "AdditionalColmap": get_colmap_keypoints
 }
