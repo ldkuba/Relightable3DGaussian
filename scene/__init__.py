@@ -18,7 +18,7 @@ from scene.gaussian_model import GaussianModel
 from utils.system_utils import searchForMaxIteration
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
-from external.Relightable3DGaussian.scene.dataset_readers import SceneInfo
+from scene.dataset_readers import SceneInfo
 
 
 def set_key_points(scene_info, key_points, colmap_point_cloud):

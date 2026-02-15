@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 from typing import NamedTuple
 
 import numpy as np
@@ -8,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from simple_knn._C import distCUDA2
+
 from utils.general_utils import inverse_sigmoid
 from utils.sh_utils import RGB2SH
 
@@ -79,6 +79,8 @@ class OnTheFly:
 
         self.camera_processed = set()
 
+        self.to_save_tmp = np.zeros((0, 3))
+
     @torch.no_grad()
     def create_prob_map(self, img):
         """Creates a probability map, reference add_new_gaussians in scene_model from on the fly
@@ -88,26 +90,10 @@ class OnTheFly:
             img[None], (self.height, self.width), mode="bilinear", align_corners=True
         )[0]
         prob_mask = get_lapla_norm(img, self.disc_kernel)  # eq. 1
-#        print("init_proba.shape: ", init_proba.shape)
-#        print("init_proba.max")
-
-#        import sys
-#        import numpy
-#        from PIL import Image
-#
-#        img = Image.open(sys.argv[1]).convert('L')
-#
-#        im = numpy.array(img)
-#        fft_mag = numpy.abs(numpy.fft.fftshift(numpy.fft.fft2(im)))
-#
-#        visual = numpy.log(fft_mag)
-#        visual = (visual - visual.min()) / (visual.max() - visual.min())
-#
-#        result = Image.fromarray((visual * 255).astype(numpy.uint8))
-#        result.save('out.bmp')
 
         return prob_mask
 
+    @torch.no_grad()
     def generate_depth_map(self, img):
         detached = img.cpu().detach().numpy()
         detached = detached.transpose(1, 2, 0)
@@ -123,25 +109,58 @@ class OnTheFly:
 
     @torch.no_grad()
     def generate_gaussians(self, prob_mask, depth_mask, cam):
-        c2w = torch.linalg.inv(cam.proj_matrix)
+        c2wT = torch.linalg.inv(cam.extrinsics.T)
 
         # ++ means ++
-        sample_mask = torch.rand_like(prob_mask) < prob_mask
-        full_coords = [torch.arange(0, sample_mask.shape[0]), torch.arange(0, sample_mask.shape[1])]
-        coords = torch.stack(torch.meshgrid(full_coords), dim=-1)[sample_mask]
-        coords = torch.cat((coords, depth_mask[coords[:, 0], coords[:, 1]].unsqueeze(-1),
-                            torch.ones_like(coords[:,0]).unsqueeze(-1)), dim=-1)
 
-        c2w = c2w.transpose(0, 1)
-        world_points = coords @ c2w
+# let's do everything in numpy, I change it later
+
+        image_mask_np = np.squeeze(cam.image_mask.detach().cpu().numpy(), axis=0)
+        sample_mask = torch.rand_like(prob_mask) < prob_mask
+        sample_mask_np = sample_mask.detach().cpu().numpy()
+        sample_mask_np = image_mask_np.astype(bool) & sample_mask_np
+        sample_mask = torch.from_numpy(sample_mask_np).to(device=sample_mask.device)
+        depth_mask_np = depth_mask.detach().cpu().numpy()
+        depth_mask_np[~image_mask_np.astype(bool)] = np.mean(depth_mask_np[image_mask_np.astype(bool)])
+        coords_np = np.argwhere(sample_mask_np)
+        z_np = depth_mask_np[coords_np[:,0], coords_np[:,1]]
+        z_np = np.expand_dims(z_np, axis=0)
+        z_np = z_np.T
+        coords_np = coords_np * z_np
+        pre_intrinsics_np = np.concatenate((coords_np, z_np), axis=1)
+        valid_mask_np = np.isfinite(pre_intrinsics_np[:,2]) & (pre_intrinsics_np[:,2] > 1e-6)
+        pre_intrinsics_np = pre_intrinsics_np[valid_mask_np]
+
+        unprojT_np = cam.intrinsics.T.detach().cpu().numpy()
+        unprojT_np = np.linalg.inv(unprojT_np)
+
+        cam_world_np = pre_intrinsics_np @ unprojT_np
+
+        with open(os.path.expanduser("~/gaussian-splatting/pcd/snap_np.npy"), "wb") as f:
+            np.save(f, cam_world_np)
+
+        print("cam.image_name", cam.image_name)
+
+#        sys.exit(0)
+
+        homo_ones = np.ones((cam_world_np.shape[0], 1))
+        cam_world_np = np.concatenate((cam_world_np, homo_ones), axis=1).astype(np.float32)
+
+        cam_world = torch.from_numpy(cam_world_np).to(device=c2wT.device)
+        world_points = cam_world @ c2wT
         world_points = world_points[:,:3]
+        assert ~ torch.isnan(cam_world).any()
+        assert ~ torch.isnan(world_points).any()
 
 #        self.project(cam)
+
+        print(f"lower/upper of x: {torch.min(world_points[:,0])}/{torch.max(world_points[:,0])}")
+        print(f"lower/upper of y: {torch.min(world_points[:,1])}/{torch.max(world_points[:,1])}")
+        print(f"lower/upper of z: {torch.min(world_points[:,2])}/{torch.max(world_points[:,2])}")
+
 #
-#        with open(os.path.expanduser("~/shared/assets/world.npy"), "wb") as f:
-#            np.save(f, coords[:,:3].detach().cpu().numpy())
-#
-#        sys.exit(0)
+        self.to_save_tmp = np.concatenate((self.to_save_tmp, world_points.detach().cpu().numpy()))
+
 
         # ++ scales ++
         dist2 = torch.clamp_min(distCUDA2(world_points), 0.0000001)
@@ -161,7 +180,8 @@ class OnTheFly:
         img = cam.original_image
 
         # ++ base colors ++
-        base_color = img.permute(1, 2, 0)[sample_mask]
+#        base_color = img.permute(1, 2, 0)[sample_mask]
+        base_color = torch.ones(world_points.shape, dtype=torch.float32)
 
         # ++ shs ++
         shs = torch.zeros((base_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
@@ -193,6 +213,7 @@ class OnTheFly:
         self.camera_processed.add(uid)
         return True
 
+    @torch.no_grad()
     def adjust_depth_map(self, viewpoint_cam, depth_map):
         id_to_xyz = self.scene_info.colmap_point_cloud
         key_points = self.scene_info.key_points.get(f'{viewpoint_cam.image_name}.png')
@@ -207,14 +228,14 @@ class OnTheFly:
 
         pixel = np.floor(xys).astype(np.int32)
         depth = depth_map[pixel[:,1], pixel[:,0]].detach().cpu().numpy()
-        xyzs_transformed = (np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.proj_matrix.T.detach().cpu().numpy())
+        xyzs_transformed = (np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy())
+        xyzs_transformed = xyzs_transformed[:,:3] @ viewpoint_cam.intrinsics.T.detach().cpu().numpy()
 #        dist = np.linalg.norm(xyzs_transformed, axis=1)
         dist = xyzs_transformed[:,2]
-        model = np.stack((depth, dist), axis=1)
-        ratios = model[:,0] / model[:, 1]
+        ratios = depth * dist
 #        print("ratios: ", ratios)
         s = np.median(ratios)
-        return s / depth_map
+        return (s / depth_map) / 10000
 
     def add_gaussians(self, gaussians, viewpoint_cam):
         prob_mask = self.create_prob_map(viewpoint_cam.original_image)
@@ -225,3 +246,15 @@ class OnTheFly:
 
         gaussians.add_on_the_fly_gaussians(gaussian_batch)
 
+    def save(self):
+        self.to_save_tmp[np.isinf(self.to_save_tmp)] = 0
+        lo = np.percentile(self.to_save_tmp, 1, axis=0)
+        hi = np.percentile(self.to_save_tmp, 99, axis=0)
+        mask = np.all((hi > self.to_save_tmp) & (lo < self.to_save_tmp), axis=1)
+        self.to_save_tmp = self.to_save_tmp[mask]
+        print("lo: ", lo)
+        print("hi: ", hi)
+        print("self.to_save_tmp.shape: ", self.to_save_tmp.shape)
+        print("self.to_save_tmp[:100,:]: ", self.to_save_tmp[:100,:])
+        with open(os.path.expanduser("~/gaussian-splatting/pcd/world.npy"), "wb") as f:
+            np.save(f, self.to_save_tmp)

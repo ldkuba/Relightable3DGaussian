@@ -125,14 +125,18 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     initial_progb = tqdm(range(0, len(scene.getTrainCameras())), desc="Initial gaussian spawning",
                          initial=0, total=len(scene.getTrainCameras()))
 
-    if pipe.on_the_fly:
-        print("##### RUN ON THE FLY GAUSSIAN SPAWNING #####")
-        viewpoint_stack_on_the_fly = scene.getTrainCameras().copy()
-        for iter in initial_progb:
-            viewpoint_cam = viewpoint_stack_on_the_fly.pop()
-            if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
-                on_the_fly_obj.add_gaussians(gaussians, viewpoint_cam)
-            print("num: ", gaussians.get_xyz.shape[0])
+    with torch.no_grad():
+
+        if pipe.on_the_fly:
+            print("##### RUN ON THE FLY GAUSSIAN SPAWNING #####")
+            viewpoint_stack_on_the_fly = scene.getTrainCameras().copy()
+            for iter in initial_progb:
+                viewpoint_cam = viewpoint_stack_on_the_fly.pop()
+                if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
+                    on_the_fly_obj.add_gaussians(gaussians, viewpoint_cam)
+                print("num: ", gaussians.get_xyz.shape[0])
+
+        on_the_fly_obj.save()
 
     for iteration in progress_bar:
         gaussians.update_learning_rate(iteration)
@@ -170,6 +174,12 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         tb_dict = render_pkg["tb_dict"]
         loss += render_pkg["loss"]
 
+        if wandb_run is not None:
+            wandb_run.log({
+                "psnr": tb_dict['psnr'],
+                "ssim": tb_dict['ssim']
+            }, step=iteration)
+
         # Diff-SPSR
         if args.diff_spsr:
                 
@@ -195,12 +205,12 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 loss += loss_depth * opt.lambda_vol_depth_render
                 loss += loss_normal * opt.lambda_vol_normal_render
 
-        if wandb_run is not None:
-            wandb_run.log({
-                "loss_total": loss.item(),
-                "loss_depth_sdf": loss_depth.item() if args.diff_spsr and iteration > 10000 else 0,
-                "loss_normal_sdf": loss_normal.item() if args.diff_spsr and iteration > 10000 else 0,
-            }, step=iteration)
+#        if wandb_run is not None:
+#            wandb_run.log({
+#                "loss_total": loss.item(),
+#                "loss_depth_sdf": loss_depth.item() if args.diff_spsr and iteration > 10000 else 0,
+#                "loss_normal_sdf": loss_normal.item() if args.diff_spsr and iteration > 10000 else 0,
+#            }, step=iteration)
 
         loss.backward()
 
@@ -223,7 +233,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
             # Log and save
             training_report(args, tb_writer, iteration, tb_dict,
                             scene, render_fn, pipe=pipe,
-                            bg_color=background, dict_params=pbr_kwargs)
+                            bg_color=background, dict_params=pbr_kwargs, wandb_run=wandb_run)
 
             # densification
             # TODO: Use variance to influence densification
@@ -244,8 +254,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                         dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
-#            if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
-#                on_the_fly_obj.add_gaussians(gaussians, viewpoint_cam)
 
             # Optimizer step
             gaussians.step()
@@ -283,7 +291,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
 def training_report(args, tb_writer, iteration, tb_dict, scene: Scene, renderFunc, pipe,
                     bg_color: torch.Tensor, scaling_modifier=1.0, override_color=None,
-                    opt: OptimizationParams = None, is_training=False, **kwargs):
+                    opt: OptimizationParams = None, is_training=False, wandb_run=None, **kwargs):
     if tb_writer:
         for key in tb_dict:
             tb_writer.add_scalar(f'train_loss_patches/{key}', tb_dict[key], iteration)
