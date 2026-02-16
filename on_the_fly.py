@@ -230,12 +230,13 @@ class OnTheFly:
         depth = depth_map[pixel[:,1], pixel[:,0]].detach().cpu().numpy()
         xyzs_transformed = (np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy())
         xyzs_transformed = xyzs_transformed[:,:3] @ viewpoint_cam.intrinsics.T.detach().cpu().numpy()
-#        dist = np.linalg.norm(xyzs_transformed, axis=1)
-        dist = xyzs_transformed[:,2]
-        ratios = depth * dist
-#        print("ratios: ", ratios)
-        s = np.median(ratios)
-        return (s / depth_map) / 10000
+        z = xyzs_transformed[:,2]
+        inv_z = 1 / z
+        A = np.stack((depth, np.ones(depth.shape)), axis=1)
+        a, b = np.linalg.lstsq(A, inv_z, rcond=None)[0]
+        print(f"a: {a}, b: {b}")
+        self.save_plot(inv_z, A[:,0], a, b)
+        return 1.0 / (a * depth_map + b)
 
     def add_gaussians(self, gaussians, viewpoint_cam):
         prob_mask = self.create_prob_map(viewpoint_cam.original_image)
@@ -243,6 +244,7 @@ class OnTheFly:
         if self.scene_info is not None:
             depth_mask = self.adjust_depth_map(viewpoint_cam, depth_mask)
         gaussian_batch = self.generate_gaussians(prob_mask, depth_mask, viewpoint_cam)
+        sys.exit(0)
 
         gaussians.add_on_the_fly_gaussians(gaussian_batch)
 
@@ -258,3 +260,13 @@ class OnTheFly:
         print("self.to_save_tmp[:100,:]: ", self.to_save_tmp[:100,:])
         with open(os.path.expanduser("~/gaussian-splatting/pcd/world.npy"), "wb") as f:
             np.save(f, self.to_save_tmp)
+
+    def save_plot(self, x, y, a, b):
+        # https://numpy.org/doc/2.2/reference/generated/numpy.linalg.lstsq.html
+        import matplotlib.pyplot as plt
+        _ = plt.plot(x, y, 'o', label='Original data', markersize=10)
+        _ = plt.plot(x, a * x + b, 'r', label='Fitted line')
+        _ = plt.legend()
+
+        plt.tight_layout()
+        plt.savefig(os.path.expanduser("~/gaussian-splatting/model.png"), dpi=300, bbox_inches="tight")
