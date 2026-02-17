@@ -47,6 +47,7 @@ class OnTheFly:
         self.bg = bg
         self.xyz = torch.from_numpy(pcd.points).to(self.DEVICE)
         self.scene_info = scene_info
+        self.cnt_tmp = 0
 
         print("pcd.shape: ", self.xyz.shape)
 
@@ -80,6 +81,7 @@ class OnTheFly:
         self.camera_processed = set()
 
         self.to_save_tmp = np.zeros((0, 3))
+        self.colmap_to_save_tmp = np.zeros((0, 3))
 
     @torch.no_grad()
     def create_prob_map(self, img):
@@ -109,7 +111,8 @@ class OnTheFly:
 
     @torch.no_grad()
     def generate_gaussians(self, prob_mask, depth_mask, cam):
-        c2wT = torch.linalg.inv(cam.extrinsics.T)
+        c2wT = cam.extrinsics
+        c2wT = c2wT.T
 
         # ++ means ++
 
@@ -136,12 +139,11 @@ class OnTheFly:
 
         cam_world_np = pre_intrinsics_np @ unprojT_np
 
-        with open(os.path.expanduser("~/gaussian-splatting/pcd/snap_np.npy"), "wb") as f:
-            np.save(f, cam_world_np)
+#        with open(os.path.expanduser("~/gaussian-splatting/pcd/snap_np.npy"), "wb") as f:
+#            np.save(f, cam_world_np)
 
         print("cam.image_name", cam.image_name)
 
-#        sys.exit(0)
 
         homo_ones = np.ones((cam_world_np.shape[0], 1))
         cam_world_np = np.concatenate((cam_world_np, homo_ones), axis=1).astype(np.float32)
@@ -226,17 +228,22 @@ class OnTheFly:
         xys = key_points[1][m2d, :]
         xyzs = id_to_xyz[1][m3d, :]
 
-        pixel = np.floor(xys).astype(np.int32)
-        depth = depth_map[pixel[:,1], pixel[:,0]].detach().cpu().numpy()
-        xyzs_transformed = (np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy())
-        xyzs_transformed = xyzs_transformed[:,:3] @ viewpoint_cam.intrinsics.T.detach().cpu().numpy()
-        z = xyzs_transformed[:,2]
-        inv_z = 1 / z
-        A = np.stack((depth, np.ones(depth.shape)), axis=1)
-        a, b = np.linalg.lstsq(A, inv_z, rcond=None)[0]
-        print(f"a: {a}, b: {b}")
-        self.save_plot(inv_z, A[:,0], a, b)
-        return 1.0 / (a * depth_map + b)
+        pixel = np.round(xys).astype(np.int32)
+        D_rel = depth_map.detach().cpu().numpy()
+        xyzs_camera_world = (np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy())
+        self.colmap_to_save_tmp = np.concatenate((self.colmap_to_save_tmp, xyzs_camera_world[:,:3]), axis=0)
+
+        xyzs_camera_world = xyzs_camera_world[:,:3] @ viewpoint_cam.intrinsics.T.detach().cpu().numpy()
+        D_sfm = xyzs_camera_world[:,2]
+
+
+        t_sfm = self.t(D_sfm)
+        t_rel = self.t(D_rel)
+        s_sfm = self.s(D_sfm, t_sfm)
+        s_rel = self.s(D_rel, t_rel)
+
+        D = (s_sfm / s_rel) * D_rel + t_sfm - t_rel * (s_sfm / s_rel)
+        return torch.from_numpy(1.0 / D).to(device=depth_map.device)
 
     def add_gaussians(self, gaussians, viewpoint_cam):
         prob_mask = self.create_prob_map(viewpoint_cam.original_image)
@@ -244,9 +251,14 @@ class OnTheFly:
         if self.scene_info is not None:
             depth_mask = self.adjust_depth_map(viewpoint_cam, depth_mask)
         gaussian_batch = self.generate_gaussians(prob_mask, depth_mask, viewpoint_cam)
-        sys.exit(0)
 
         gaussians.add_on_the_fly_gaussians(gaussian_batch)
+
+        if self.cnt_tmp >= 2:
+            self.save()
+            sys.exit(0)
+
+        self.cnt_tmp = self.cnt_tmp + 1
 
     def save(self):
         self.to_save_tmp[np.isinf(self.to_save_tmp)] = 0
@@ -261,6 +273,9 @@ class OnTheFly:
         with open(os.path.expanduser("~/gaussian-splatting/pcd/world.npy"), "wb") as f:
             np.save(f, self.to_save_tmp)
 
+        with open(os.path.expanduser("~/gaussian-splatting/pcd/colmap.npy"), "wb") as f:
+            np.save(f, self.colmap_to_save_tmp)
+
     def save_plot(self, x, y, a, b):
         # https://numpy.org/doc/2.2/reference/generated/numpy.linalg.lstsq.html
         import matplotlib.pyplot as plt
@@ -270,3 +285,9 @@ class OnTheFly:
 
         plt.tight_layout()
         plt.savefig(os.path.expanduser("~/gaussian-splatting/model.png"), dpi=300, bbox_inches="tight")
+
+    def t(self, D):
+        return np.median(D)
+
+    def s(self, D, tD):
+        return np.mean(np.abs(D - tD))
