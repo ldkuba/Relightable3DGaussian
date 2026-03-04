@@ -165,8 +165,8 @@ class OnTheFly:
         pre_intrinsics = torch.concatenate((coords, z_np), dim=1)
 
         # filter out points too close to camera and possible glitches from depth estimator
-        valid_mask = torch.isfinite(pre_intrinsics[:,2]) & (pre_intrinsics[:,2] > 1e-6)
-        pre_intrinsics = pre_intrinsics[valid_mask]
+#        valid_mask = torch.isfinite(pre_intrinsics[:,2]) & (pre_intrinsics[:,2] > 1e-6)
+#        pre_intrinsics = pre_intrinsics[valid_mask]
 
         # apply inverse intrinsics
         unproj = torch.linalg.inv(cam.intrinsics).T
@@ -210,8 +210,7 @@ class OnTheFly:
         img = cam.original_image
 
         # ++ base colors ++
-#        base_color = img.permute(1, 2, 0)[sample_mask]
-        base_color = torch.ones(world_points.shape, dtype=torch.float32)
+        base_color = img.permute(1, 2, 0)[sample_mask]
 
         # ++ shs ++
         shs = torch.zeros((base_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
@@ -367,7 +366,7 @@ class OnTheFly:
 #        if self.cnt_tmp >= 99:
 #            self.save()
 #            sys.exit(0)
-
+#
 #        self.cnt_tmp = self.cnt_tmp + 1
 
     def save(self):

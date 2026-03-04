@@ -138,8 +138,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         on_the_fly_obj.save()
 
-    sys.exit(0)
-
     for iteration in progress_bar:
         gaussians.update_learning_rate(iteration)
 
