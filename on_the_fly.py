@@ -13,13 +13,17 @@ from utils.sh_utils import RGB2SH
 
 from PIL import Image
 
+from scipy.spatial import cKDTree as KDTree, cKDTree
+
 sys.path.append('external')
 from on_the_fly_nvs.utils import (
     get_lapla_norm,
 )
 
 sys.path.append("external/on_the_fly_nvs/submodules/Depth-Anything-V2")
+sys.path.append("external/on_the_fly_nvs")
 from depth_anything_v2.dpt import DepthAnythingV2
+from on_the_fly_nvs.poses.triangulator import matches_to_points
 
 class GaussianBatch(NamedTuple):
     means: torch.Tensor
@@ -84,6 +88,27 @@ class OnTheFly:
         self.colmap_to_save_tmp = np.zeros((0, 3))
 
     @torch.no_grad()
+    def project(self, cam, points):
+        points = points.to(dtype=torch.float32)
+        points = torch.concatenate((points, torch.ones(points.shape[0], 1)), dim=1)
+        cam_world = points @ cam.extrinsics.T
+        projected = cam_world[:,:3] @ cam.intrinsics.T
+        projected = projected / torch.unsqueeze(projected[:,2], dim=1)
+        projected = torch.floor(projected).to(dtype=torch.int32)
+
+        x = projected[:,0]
+        y = projected[:,1]
+
+        x = x[(x >= 0) & (x < cam.image_width)]
+        y = y[(y >= 0) & (y < cam.image_height)]
+
+        mask = torch.zeros((cam.image_width, cam.image_height), device=projected.device)
+        mask[y, x] = 1.0
+
+        return mask
+
+
+    @torch.no_grad()
     def create_prob_map(self, img):
         """Creates a probability map, reference add_new_gaussians in scene_model from on the fly
         - kernel is eq. 1 in paper"""
@@ -111,56 +136,59 @@ class OnTheFly:
 
     @torch.no_grad()
     def generate_gaussians(self, prob_mask, depth_mask, cam):
-        c2wT = cam.extrinsics
-        c2wT = c2wT.T
-
         # ++ means ++
 
-# let's do everything in numpy, I change it later
+        c2w = torch.linalg.inv(cam.extrinsics)
+        c2w = c2w.T
 
-        image_mask_np = np.squeeze(cam.image_mask.detach().cpu().numpy(), axis=0)
+        image_mask = torch.squeeze(cam.image_mask).to(device=c2w.device)
+
+        # generate probability mask
         sample_mask = torch.rand_like(prob_mask) < prob_mask
-        sample_mask_np = sample_mask.detach().cpu().numpy()
-        sample_mask_np = image_mask_np.astype(bool) & sample_mask_np
-        sample_mask = torch.from_numpy(sample_mask_np).to(device=sample_mask.device)
-        depth_mask_np = depth_mask.detach().cpu().numpy()
-        depth_mask_np[~image_mask_np.astype(bool)] = np.mean(depth_mask_np[image_mask_np.astype(bool)])
-        coords_np = np.argwhere(sample_mask_np)
-        z_np = depth_mask_np[coords_np[:,0], coords_np[:,1]]
-        z_np = np.expand_dims(z_np, axis=0)
+        sample_mask = image_mask.to(torch.bool) & sample_mask
+
+        # solely for vizual debugging, set background to mean of object
+        depth_mask[~image_mask.to(torch.bool)] = torch.mean(depth_mask[image_mask.to(torch.bool)])
+
+        # get list of (u, v) and z
+        coords = torch.nonzero(sample_mask)
+        z_np = depth_mask[coords[:,0], coords[:,1]].to(dtype=torch.float32)
+        z_np = torch.unsqueeze(z_np, dim=0)
         z_np = z_np.T
-        coords_np = coords_np * z_np
-        pre_intrinsics_np = np.concatenate((coords_np, z_np), axis=1)
-        valid_mask_np = np.isfinite(pre_intrinsics_np[:,2]) & (pre_intrinsics_np[:,2] > 1e-6)
-        pre_intrinsics_np = pre_intrinsics_np[valid_mask_np]
 
-        unprojT_np = cam.intrinsics.T.detach().cpu().numpy()
-        unprojT_np = np.linalg.inv(unprojT_np)
+        # get (u, v) to (x, y) / (u = y, v = x)
+        coords = coords[:, [1, 0]]
+        coords = coords.to(dtype=torch.float32) + 0.5
 
-        cam_world_np = pre_intrinsics_np @ unprojT_np
+        # prepare for unproject -> (zu, zv, z)
+        coords = coords * z_np
+        pre_intrinsics = torch.concatenate((coords, z_np), dim=1)
 
-#        with open(os.path.expanduser("~/gaussian-splatting/pcd/snap_np.npy"), "wb") as f:
-#            np.save(f, cam_world_np)
+        # filter out points too close to camera and possible glitches from depth estimator
+        valid_mask = torch.isfinite(pre_intrinsics[:,2]) & (pre_intrinsics[:,2] > 1e-6)
+        pre_intrinsics = pre_intrinsics[valid_mask]
+
+        # apply inverse intrinsics
+        unproj = torch.linalg.inv(cam.intrinsics).T
+
+        cam_world = pre_intrinsics @ unproj
+
+        # debug
+        with open(os.path.expanduser("~/gaussian-splatting/pcd/snap_np.npy"), "wb") as f:
+            np.save(f, cam_world.detach().cpu().numpy())
 
         print("cam.image_name", cam.image_name)
 
+        # put reconstruction into world space
+        homo_ones = torch.ones((cam_world.shape[0], 1))
+        cam_world = torch.concatenate((cam_world, homo_ones), dim=1)
 
-        homo_ones = np.ones((cam_world_np.shape[0], 1))
-        cam_world_np = np.concatenate((cam_world_np, homo_ones), axis=1).astype(np.float32)
-
-        cam_world = torch.from_numpy(cam_world_np).to(device=c2wT.device)
-        world_points = cam_world @ c2wT
+        world_points = cam_world @ c2w
         world_points = world_points[:,:3]
         assert ~ torch.isnan(cam_world).any()
         assert ~ torch.isnan(world_points).any()
 
-#        self.project(cam)
-
-        print(f"lower/upper of x: {torch.min(world_points[:,0])}/{torch.max(world_points[:,0])}")
-        print(f"lower/upper of y: {torch.min(world_points[:,1])}/{torch.max(world_points[:,1])}")
-        print(f"lower/upper of z: {torch.min(world_points[:,2])}/{torch.max(world_points[:,2])}")
-
-#
+        # debug
         self.to_save_tmp = np.concatenate((self.to_save_tmp, world_points.detach().cpu().numpy()))
 
 
@@ -216,7 +244,7 @@ class OnTheFly:
         return True
 
     @torch.no_grad()
-    def adjust_depth_map(self, viewpoint_cam, depth_map):
+    def get_key_points(self, viewpoint_cam):
         id_to_xyz = self.scene_info.colmap_point_cloud
         key_points = self.scene_info.key_points.get(f'{viewpoint_cam.image_name}.png')
 
@@ -225,27 +253,109 @@ class OnTheFly:
 
         _, m3d, m2d = np.intersect1d(id3d, id2d, return_indices=True)
 
-        xys = key_points[1][m2d, :]
-        xyzs = id_to_xyz[1][m3d, :]
+        tmp = np.round(key_points[1][m2d, :]).astype(dtype=np.int32)
+        n = 800
+        coord = np.zeros((n, n), dtype=float)
+        coord[tmp[:, 1], tmp[:, 0]] = 1.0
 
-        pixel = np.round(xys).astype(np.int32)
+        proj = self.project(viewpoint_cam, torch.from_numpy(id_to_xyz[1][m3d, :].astype(dtype=float)).to(device="cuda")).detach().cpu().numpy()
+
+        return key_points[1][m2d, :], id_to_xyz[1][m3d, :]
+
+    @torch.no_grad()
+    def adjust_depth_map(self, viewpoint_cam, depth_map):
+        uv, xyzs = self.get_key_points(viewpoint_cam)
+        uv = np.round(uv).astype(dtype=np.int32)
+        u = uv[:,0]
+        v = uv[:,1]
+
         D_rel = depth_map.detach().cpu().numpy()
         xyzs_camera_world = (np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy())
         self.colmap_to_save_tmp = np.concatenate((self.colmap_to_save_tmp, xyzs_camera_world[:,:3]), axis=0)
 
         xyzs_camera_world = xyzs_camera_world[:,:3] @ viewpoint_cam.intrinsics.T.detach().cpu().numpy()
-        D_sfm = xyzs_camera_world[:,2]
-
+        D_sfm = 1.0 / xyzs_camera_world[:,2]
 
         t_sfm = self.t(D_sfm)
-        t_rel = self.t(D_rel)
+        t_rel = self.t(D_rel[v, u])
         s_sfm = self.s(D_sfm, t_sfm)
-        s_rel = self.s(D_rel, t_rel)
+        s_rel = self.s(D_rel[v, u], t_rel)
 
         D = (s_sfm / s_rel) * D_rel + t_sfm - t_rel * (s_sfm / s_rel)
-        return torch.from_numpy(1.0 / D).to(device=depth_map.device)
+        D = np.clip(D, 1e-6, 1e6)
+        D = 1.0 / D
+        D = self.adjust_depth_knn(D, uv, xyzs_camera_world[:,2])
+        img_D = D.copy()
+        self.save_img(img_D, f"{viewpoint_cam.image_name}_cor")
+        img_dav2 = depth_map.detach().cpu().numpy()
+        self.save_img(img_dav2, f"{viewpoint_cam.image_name}_dav2", inv=True)
+        return torch.from_numpy(D).to(device=depth_map.device)
+
+    def save_img(self, img_D, name, inv=False):
+        img_D = ((img_D - img_D.min()) / (img_D.max() - img_D.min())) * 255
+        if (inv):
+            img_D = 255 - img_D
+        image_D = Image.fromarray(img_D.astype(np.uint8))
+        image_D.save(os.path.expanduser(f"~/gaussian-splatting/pcd/depth_maps/{name}_depth_map.png"))
+
+    @torch.no_grad()
+    def adjust_depth_knn(self, D, uv_desc, z_sfm, k=8, stride=4, p=2.0, eps=1e-6):
+        H, W = D.shape
+
+        u = uv_desc[:, 0].astype(dtype=np.int32)
+        v = uv_desc[:, 1].astype(dtype=np.int32)
+
+        z_map = D[v, u]
+
+        delta = z_sfm - z_map
+
+        tree = cKDTree(uv_desc)
+
+        ys = np.arange(0, H, stride, dtype=np.int32)
+        xs = np.arange(0, W, stride, dtype=np.int32)
+        gx, gy = np.meshgrid(xs, ys)
+        Q = np.stack([gx.ravel(), gy.ravel()], axis=1).astype(np.float32)
+
+        kk = min(k, len(uv_desc))
+        dists, idx = tree.query(Q, k=kk, workers=-1)  # workers=-1 uses all cores (newer SciPy)
+
+        # make shapes consistent for kk=1
+        if kk == 1:
+            dists = dists[:, None]
+            idx = idx[:, None]
+
+        # inverse-distance weights
+        w = 1.0 / (dists ** p + eps)
+        Delta = (w * delta[idx]).sum(axis=1) / (w.sum(axis=1) + eps)
+        Delta = Delta.reshape(len(ys), len(xs))
+
+        # upsample back to full res (fast nearest-neighbor)
+        Delta_full = np.repeat(np.repeat(Delta, stride, axis=0), stride, axis=1)[:H, :W]
+
+        return D + Delta_full
+
+    @torch.no_grad()
+    def knn_delta_map(self, u, v, delta, H, W, k=4, p=2, eps=1e-6):
+        key_uv = np.stack([u, v], axis=1)  # (x,y)
+        grid_u, grid_v = np.meshgrid(np.arange(W), np.arange(H))
+        pts = np.stack([grid_u.ravel(), grid_v.ravel()], axis=1)
+
+        tree = KDTree(key_uv)
+        dists, idxs = tree.query(pts, k=min(k, key_uv.shape[0]))  # (HW,k)
+
+        # If k=1, make shapes consistent
+        if idxs.ndim == 1:
+            idxs = idxs[:, None]
+            dists = dists[:, None]
+
+        w = 1.0 / (dists + eps) ** p
+        deltas = delta[idxs]  # (HW,k)
+        delta_interp = (w * deltas).sum(1) / w.sum(1)
+        return delta_interp.reshape(H, W)
 
     def add_gaussians(self, gaussians, viewpoint_cam):
+        if len(self.scene_info.key_points.get(f'{viewpoint_cam.image_name}.png')[0]) < 1000:
+            return
         prob_mask = self.create_prob_map(viewpoint_cam.original_image)
         depth_mask = self.generate_depth_map(viewpoint_cam.original_image)
         if self.scene_info is not None:
@@ -254,37 +364,16 @@ class OnTheFly:
 
         gaussians.add_on_the_fly_gaussians(gaussian_batch)
 
-        if self.cnt_tmp >= 2:
-            self.save()
-            sys.exit(0)
+#        if self.cnt_tmp >= 99:
+#            self.save()
+#            sys.exit(0)
 
-        self.cnt_tmp = self.cnt_tmp + 1
+#        self.cnt_tmp = self.cnt_tmp + 1
 
     def save(self):
-        self.to_save_tmp[np.isinf(self.to_save_tmp)] = 0
-        lo = np.percentile(self.to_save_tmp, 1, axis=0)
-        hi = np.percentile(self.to_save_tmp, 99, axis=0)
-        mask = np.all((hi > self.to_save_tmp) & (lo < self.to_save_tmp), axis=1)
-        self.to_save_tmp = self.to_save_tmp[mask]
-        print("lo: ", lo)
-        print("hi: ", hi)
         print("self.to_save_tmp.shape: ", self.to_save_tmp.shape)
-        print("self.to_save_tmp[:100,:]: ", self.to_save_tmp[:100,:])
         with open(os.path.expanduser("~/gaussian-splatting/pcd/world.npy"), "wb") as f:
             np.save(f, self.to_save_tmp)
-
-        with open(os.path.expanduser("~/gaussian-splatting/pcd/colmap.npy"), "wb") as f:
-            np.save(f, self.colmap_to_save_tmp)
-
-    def save_plot(self, x, y, a, b):
-        # https://numpy.org/doc/2.2/reference/generated/numpy.linalg.lstsq.html
-        import matplotlib.pyplot as plt
-        _ = plt.plot(x, y, 'o', label='Original data', markersize=10)
-        _ = plt.plot(x, a * x + b, 'r', label='Fitted line')
-        _ = plt.legend()
-
-        plt.tight_layout()
-        plt.savefig(os.path.expanduser("~/gaussian-splatting/model.png"), dpi=300, bbox_inches="tight")
 
     def t(self, D):
         return np.median(D)
