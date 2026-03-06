@@ -29,6 +29,7 @@ from on_the_fly import OnTheFly
 import time
 
 def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, wandb_run=None):
+    torch.cuda.memory._record_memory_history()
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
@@ -137,7 +138,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 print("num: ", gaussians.get_xyz.shape[0])
 
         on_the_fly_obj.save()
-
+    torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
     for iteration in progress_bar:
         gaussians.update_learning_rate(iteration)
 

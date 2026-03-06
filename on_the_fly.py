@@ -193,8 +193,12 @@ class OnTheFly:
 
 
         # ++ scales ++
-        dist2 = torch.clamp_min(distCUDA2(world_points), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
+        filtered_prob_mask = prob_mask[sample_mask]
+        scales = 1.0 / (2 * torch.sqrt(filtered_prob_mask)).unsqueeze(1)
+        f = cam.image_width / (2 * np.tan(cam.FoVx / 2))
+        scales = (depth_mask[sample_mask].unsqueeze(dim=1).to(dtype=torch.float32) * scales) / f
+        scales = torch.log(scales)
+        scales = scales.repeat(1, 3)
 
         # ++ rotations ++
         rots = torch.zeros((world_points.shape[0], 4), device="cuda")
@@ -363,11 +367,11 @@ class OnTheFly:
 
         gaussians.add_on_the_fly_gaussians(gaussian_batch)
 
-#        if self.cnt_tmp >= 99:
-#            self.save()
-#            sys.exit(0)
-#
-#        self.cnt_tmp = self.cnt_tmp + 1
+        if self.cnt_tmp >= 20:
+            self.save()
+            return
+
+        self.cnt_tmp = self.cnt_tmp + 1
 
     def save(self):
         print("self.to_save_tmp.shape: ", self.to_save_tmp.shape)
