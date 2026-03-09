@@ -1,12 +1,10 @@
 import os
-import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision
 from collections import defaultdict
 from random import randint
 
-from PIL import Image
 
 from utils.loss_utils import ssim
 from gaussian_renderer import render_fn_dict
@@ -17,7 +15,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr, visualize_depth
 from utils.system_utils import prepare_output_and_logger
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, OptimizationParams
+from arguments import ModelParams, PipelineParams, OptimizationParams, OnTheFlyParams
 from gui import GUI
 from scene.direct_light_map import DirectLightMap
 from utils.graphics_utils import rgb_to_srgb
@@ -28,7 +26,7 @@ from on_the_fly import OnTheFly
 
 import time
 
-def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, wandb_run=None):
+def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, on_the_fly_args: OnTheFlyParams, wandb_run=None):
     torch.cuda.memory._record_memory_history()
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -54,7 +52,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
     tmp = scene.getTrainCameras()[0]
     on_the_fly_obj = OnTheFly(tmp.image_width, tmp.image_height, dataset.sh_degree,
-                              scene.scene_info)
+                              on_the_fly_args, scene.scene_info)
 
     """
     Setup PBR components
@@ -469,6 +467,7 @@ def main(args, wandb_run=None):
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    otfp = OnTheFlyParams(parser)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument('--gui', action='store_true', default=False, help="use gui")
@@ -497,7 +496,7 @@ def main(args, wandb_run=None):
 
     args.is_pbr = args.type in ['neilf']
 
-    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args), wandb_run=wandb_run)
+    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args), otfp.extract(args), wandb_run=wandb_run)
     print("\nTraining complete.")
     return gaussians
 

@@ -69,6 +69,18 @@ class PipelineParams(ParamGroup):
         self.on_the_fly = False
         super().__init__(parser, "Pipeline Parameters")
 
+class OnTheFlyParams(ParamGroup):
+    def __init__(self, parser):
+        self.knn_p = 2
+        self.error_threshold = 0.75
+        self.feature_threshold = 500
+        self.base_prob = 0.025
+        self.normalize_prob = False
+        self.knn_n = 8
+        self.knn_stride = 1
+        self.knn_epsilon = 1e-6
+        super().__init__(parser, "Pipeline Parameters")
+
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):

@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from simple_knn._C import distCUDA2
 
+from external.Relightable3DGaussian.arguments import OnTheFlyParams
 from utils.general_utils import inverse_sigmoid
 from utils.sh_utils import RGB2SH
 
@@ -15,15 +16,8 @@ from PIL import Image
 
 from scipy.spatial import cKDTree as KDTree, cKDTree
 
-sys.path.append('external')
-from on_the_fly_nvs.utils import (
-    get_lapla_norm,
-)
-
 sys.path.append("external/on_the_fly_nvs/submodules/Depth-Anything-V2")
-sys.path.append("external/on_the_fly_nvs")
 from depth_anything_v2.dpt import DepthAnythingV2
-from on_the_fly_nvs.poses.triangulator import matches_to_points
 
 class GaussianBatch(NamedTuple):
     means: torch.Tensor
@@ -39,21 +33,51 @@ class GaussianBatch(NamedTuple):
     normal_gradient_accum: torch.Tensor
     denom: torch.Tensor
 
+#class OnTheFlyParams(ParamGroup):
+#    def __init__(self, parser):
+#        self.on_the_fly = False
+#        self.knn_p = 2
+#        self.error_threshold = 0.75
+#        self.feature_threshold = 500
+#        self.base_prob = 0.025
+#        self.normalize_prob = False
+#        self.knn_n = 8
+#        self.knn_stride = 1
+#        self.knn_epsilon = 1e-6
+#        super().__init__(parser, "Pipeline Parameters")
+
+
 class OnTheFly:
 
-    def __init__(self, width, height, max_sh_degree, scene_info = None, prob_scale = 1.0, bg = 0.0):
+    def __init__(self, width, height, max_sh_degree, otfp: OnTheFlyParams, scene_info = None, bg = 0.0):
+
+        # set device
         self.DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+
+        # set parameters
+        self.knn_p = otfp.knn_p
+        self.error_threshold = otfp.error_threshold
+        self.feature_threshold = otfp.feature_threshold
+        self.base_prob = otfp.base_prob
+        self.normalize_prob = otfp.normalize_prob
+        self.knn_n = otfp.knn_n
+        self.knn_stride = otfp.knn_stride
+        self.knn_epsilon = otfp.knn_epsilon
+
 
         self.width = width
         self.height = height
-        self.prob_scale = prob_scale
+
+        self.prob_scale = 1.0
         self.max_sh_degree = max_sh_degree
         self.bg = bg
-        self.error_threshold = 0.75
-        self.feature_threshold = 500
+
+        # filter colmap points with too high reporjection error
         error_mask = scene_info.errors < self.error_threshold
         self.xyzs = scene_info.xyzs[error_mask]
         self.p3ids = scene_info.p3ids[error_mask]
+
+
         self.scene_info = scene_info
 
         ## Initialize helpers for Gaussian initialization
@@ -87,27 +111,6 @@ class OnTheFly:
         self.colmap_to_save_tmp = np.zeros((0, 3))
 
     @torch.no_grad()
-    def project(self, cam, points):
-        points = points.to(dtype=torch.float32)
-        points = torch.concatenate((points, torch.ones(points.shape[0], 1)), dim=1)
-        cam_world = points @ cam.extrinsics.T
-        projected = cam_world[:,:3] @ cam.intrinsics.T
-        projected = projected / torch.unsqueeze(projected[:,2], dim=1)
-        projected = torch.floor(projected).to(dtype=torch.int32)
-
-        x = projected[:,0]
-        y = projected[:,1]
-
-        x = x[(x >= 0) & (x < cam.image_width)]
-        y = y[(y >= 0) & (y < cam.image_height)]
-
-        mask = torch.zeros((cam.image_width, cam.image_height), device=projected.device)
-        mask[y, x] = 1.0
-
-        return mask
-
-
-    @torch.no_grad()
     def create_prob_map(self, img):
         """Creates a probability map, reference add_new_gaussians in scene_model from on the fly
         - kernel is eq. 1 in paper"""
@@ -115,7 +118,12 @@ class OnTheFly:
         img = F.interpolate(
             img[None], (self.height, self.width), mode="bilinear", align_corners=True
         )[0]
-        prob_mask = get_lapla_norm(img, self.disc_kernel)  # eq. 1
+        prob_mask = self.get_lapla_norm(img, self.disc_kernel)  # eq. 1
+
+        prob_mask += self.base_prob
+
+        if self.normalize_prob:
+            prob_mask = prob_mask / torch.max(prob_mask)
 
         return prob_mask
 
@@ -281,7 +289,7 @@ class OnTheFly:
         D = (s_sfm / s_rel) * D_rel + t_sfm - t_rel * (s_sfm / s_rel)
         D = np.clip(D, 1e-6, 1e6)
         D = 1.0 / D
-        D = self.adjust_depth_knn(D, uv, xyzs_camera_world[:,2])
+        D = self.adjust_depth_knn(D, uv, xyzs_camera_world[:,2], k=self.knn_n, stride=self.knn_stride, p=self.knn_p, eps=self.knn_epsilon)
         img_D = D.copy()
         self.save_img(img_D, f"{viewpoint_cam.image_name}_cor")
         img_dav2 = depth_map.detach().cpu().numpy()
@@ -296,7 +304,7 @@ class OnTheFly:
         image_D.save(os.path.expanduser(f"~/gaussian-splatting/pcd/depth_maps/{name}_depth_map.png"))
 
     @torch.no_grad()
-    def adjust_depth_knn(self, D, uv_desc, z_sfm, k=8, stride=1, p=2.0, eps=1e-6):
+    def adjust_depth_knn(self, D, uv_desc, z_sfm, k, stride, p, eps):
         H, W = D.shape
 
         u = uv_desc[:, 0].astype(dtype=np.int32)
@@ -353,3 +361,23 @@ class OnTheFly:
 
     def s(self, D, tD):
         return np.mean(np.abs(D - tD))
+
+    """
+    from on the fly
+    """
+    def get_lapla_norm(self, img, kernel):
+        laplacian_kernel = (
+            torch.tensor(
+                [[0, 1, 0], [1, -4, 1], [0, 1, 0]], device="cuda", dtype=torch.float32
+            )
+            .unsqueeze(0)
+            .unsqueeze(0)
+        )
+        laplacian_kernel = laplacian_kernel.repeat(1, img.shape[0], 1, 1)
+        laplacian = F.conv2d(img[None], laplacian_kernel, padding="same")
+        laplacian_norm = torch.linalg.vector_norm(laplacian, ord=1, dim=1, keepdim=True)
+        laplacian_norm[..., :, 0] = 0
+        laplacian_norm[..., :, -1] = 0
+        laplacian_norm[..., 0, :] = 0
+        laplacian_norm[..., -1, :] = 0
+        return F.conv2d(laplacian_norm, kernel, padding="same")[0, 0].clamp(0, 1)
