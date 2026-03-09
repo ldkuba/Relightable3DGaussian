@@ -21,14 +21,16 @@ from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 from scene.dataset_readers import SceneInfo
 
 
-def set_key_points(scene_info, key_points, colmap_point_cloud):
+def set_key_points(scene_info, key_points, p3ids, xyzs, errors):
     return SceneInfo(point_cloud=scene_info.point_cloud,
                      train_cameras=scene_info.train_cameras,
                      test_cameras=scene_info.test_cameras,
                      nerf_normalization=scene_info.nerf_normalization,
                      ply_path=scene_info.ply_path,
                      key_points=key_points,
-                     colmap_point_cloud=colmap_point_cloud)
+                     xyzs=xyzs,
+                     p3ids=p3ids,
+                     errors=errors)
 
 
 class Scene:
@@ -71,8 +73,8 @@ class Scene:
                 if os.path.exists(os.path.join(args.source_path, "colmap")):
                     print("Found additional colmap data!")
                     extrinsics_path = os.path.join(args.source_path, "colmap/sparse/0/")
-                    colmap_point_cloud, colmap_key_features = sceneLoadTypeCallbacks["AdditionalColmap"](extrinsics_path)
-                    scene_info = set_key_points(scene_info, colmap_key_features, colmap_point_cloud)
+                    p3ids, xyzs, errors, colmap_key_features = sceneLoadTypeCallbacks["AdditionalColmap"](extrinsics_path)
+                    scene_info = set_key_points(scene_info, colmap_key_features, p3ids, xyzs, errors)
                     print("loaded add colmap data")
 
         elif os.path.exists(os.path.join(args.source_path, "inputs/sfm_scene.json")):

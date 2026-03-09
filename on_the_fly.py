@@ -41,7 +41,7 @@ class GaussianBatch(NamedTuple):
 
 class OnTheFly:
 
-    def __init__(self, width, height, max_sh_degree, pcd, scene_info = None, prob_scale = 1.0, bg = 0.0):
+    def __init__(self, width, height, max_sh_degree, scene_info = None, prob_scale = 1.0, bg = 0.0):
         self.DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
         self.width = width
@@ -49,11 +49,12 @@ class OnTheFly:
         self.prob_scale = prob_scale
         self.max_sh_degree = max_sh_degree
         self.bg = bg
-        self.xyz = torch.from_numpy(pcd.points).to(self.DEVICE)
+        self.error_threshold = 0.75
+        self.feature_threshold = 500
+        error_mask = scene_info.errors < self.error_threshold
+        self.xyzs = scene_info.xyzs[error_mask]
+        self.p3ids = scene_info.p3ids[error_mask]
         self.scene_info = scene_info
-        self.cnt_tmp = 0
-
-        print("pcd.shape: ", self.xyz.shape)
 
         ## Initialize helpers for Gaussian initialization
         radius = 3
@@ -67,8 +68,6 @@ class OnTheFly:
         self.disc_kernel = self.disc_kernel.cuda() / self.disc_kernel.sum()
 
         # for depth map
-
-
         model_configs = {
             'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
             'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
@@ -124,8 +123,6 @@ class OnTheFly:
     def generate_depth_map(self, img):
         detached = img.cpu().detach().numpy()
         detached = detached.transpose(1, 2, 0)
-#        print("detached.shape: ", detached.shape)
-#        print(np.max(detached))
         depth = self.model.infer_image(detached * 255, input_size=self.width)
 
         return torch.from_numpy(depth).to(img.device)
@@ -248,22 +245,15 @@ class OnTheFly:
 
     @torch.no_grad()
     def get_key_points(self, viewpoint_cam):
-        id_to_xyz = self.scene_info.colmap_point_cloud
+        xyzs = self.xyzs
         key_points = self.scene_info.key_points.get(f'{viewpoint_cam.image_name}.png')
 
-        id3d = id_to_xyz[0]
+        id3d = self.p3ids
         id2d = key_points[0]
 
         _, m3d, m2d = np.intersect1d(id3d, id2d, return_indices=True)
 
-        tmp = np.round(key_points[1][m2d, :]).astype(dtype=np.int32)
-        n = 800
-        coord = np.zeros((n, n), dtype=float)
-        coord[tmp[:, 1], tmp[:, 0]] = 1.0
-
-        proj = self.project(viewpoint_cam, torch.from_numpy(id_to_xyz[1][m3d, :].astype(dtype=float)).to(device="cuda")).detach().cpu().numpy()
-
-        return key_points[1][m2d, :], id_to_xyz[1][m3d, :]
+        return key_points[1][m2d, :], xyzs[m3d, :]
 
     @torch.no_grad()
     def adjust_depth_map(self, viewpoint_cam, depth_map):
@@ -271,6 +261,10 @@ class OnTheFly:
         uv = np.round(uv).astype(dtype=np.int32)
         u = uv[:,0]
         v = uv[:,1]
+
+        with open(os.path.expanduser(f"~/gaussian-splatting/pcd/colmaps/{viewpoint_cam.image_name}.npy"), "wb") as f:
+            np.save(f, xyzs)
+
 
         D_rel = depth_map.detach().cpu().numpy()
         xyzs_camera_world = (np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy())
@@ -302,7 +296,7 @@ class OnTheFly:
         image_D.save(os.path.expanduser(f"~/gaussian-splatting/pcd/depth_maps/{name}_depth_map.png"))
 
     @torch.no_grad()
-    def adjust_depth_knn(self, D, uv_desc, z_sfm, k=8, stride=4, p=2.0, eps=1e-6):
+    def adjust_depth_knn(self, D, uv_desc, z_sfm, k=8, stride=1, p=2.0, eps=1e-6):
         H, W = D.shape
 
         u = uv_desc[:, 0].astype(dtype=np.int32)
@@ -320,7 +314,7 @@ class OnTheFly:
         Q = np.stack([gx.ravel(), gy.ravel()], axis=1).astype(np.float32)
 
         kk = min(k, len(uv_desc))
-        dists, idx = tree.query(Q, k=kk, workers=-1)  # workers=-1 uses all cores (newer SciPy)
+        dists, idx = tree.query(Q, k=kk, workers=-1)
 
         # make shapes consistent for kk=1
         if kk == 1:
@@ -337,27 +331,8 @@ class OnTheFly:
 
         return D + Delta_full
 
-    @torch.no_grad()
-    def knn_delta_map(self, u, v, delta, H, W, k=4, p=2, eps=1e-6):
-        key_uv = np.stack([u, v], axis=1)  # (x,y)
-        grid_u, grid_v = np.meshgrid(np.arange(W), np.arange(H))
-        pts = np.stack([grid_u.ravel(), grid_v.ravel()], axis=1)
-
-        tree = KDTree(key_uv)
-        dists, idxs = tree.query(pts, k=min(k, key_uv.shape[0]))  # (HW,k)
-
-        # If k=1, make shapes consistent
-        if idxs.ndim == 1:
-            idxs = idxs[:, None]
-            dists = dists[:, None]
-
-        w = 1.0 / (dists + eps) ** p
-        deltas = delta[idxs]  # (HW,k)
-        delta_interp = (w * deltas).sum(1) / w.sum(1)
-        return delta_interp.reshape(H, W)
-
     def add_gaussians(self, gaussians, viewpoint_cam):
-        if len(self.scene_info.key_points.get(f'{viewpoint_cam.image_name}.png')[0]) < 1000:
+        if len(self.scene_info.key_points.get(f'{viewpoint_cam.image_name}.png')[0]) < self.feature_threshold:
             return
         prob_mask = self.create_prob_map(viewpoint_cam.original_image)
         depth_mask = self.generate_depth_map(viewpoint_cam.original_image)
@@ -367,16 +342,11 @@ class OnTheFly:
 
         gaussians.add_on_the_fly_gaussians(gaussian_batch)
 
-        if self.cnt_tmp >= 20:
-            self.save()
-            return
-
-        self.cnt_tmp = self.cnt_tmp + 1
-
     def save(self):
         print("self.to_save_tmp.shape: ", self.to_save_tmp.shape)
         with open(os.path.expanduser("~/gaussian-splatting/pcd/world.npy"), "wb") as f:
             np.save(f, self.to_save_tmp)
+
 
     def t(self, D):
         return np.median(D)

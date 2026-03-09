@@ -43,7 +43,9 @@ class SceneInfo(NamedTuple):
     nerf_normalization: dict
     ply_path: str
     key_points: dict = None
-    colmap_point_cloud: any = None
+    xyzs: np.ndarray = None
+    p3ids: np.ndarray = None
+    errors: np.ndarray = None
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
@@ -609,18 +611,18 @@ def readSynthetic4RelightInfo(path, white_background, eval, debug=False):
 
 
 def get_colmap_keypoints(base_path):
-    id_to_xyz = read_indexed_points3d_binary(os.path.join(base_path, "points3D.bin"))
+    p3ids, xyzs, errors = read_indexed_points3d_binary(os.path.join(base_path, "points3D.bin"))
     images = read_extrinsics_binary(os.path.join(base_path, "images.bin")).values()
 
-    a = {}
+    key_features = {}
     for img in images:
         pids = img.point3D_ids
         xys = img.xys[pids != -1]
         pids = pids[pids != -1]
 
-        a[img.name] = (pids, xys)
+        key_features[img.name] = (pids, xys)
 
-    return id_to_xyz, a
+    return p3ids, xyzs, errors, key_features
 
 
 sceneLoadTypeCallbacks = {

@@ -54,7 +54,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
     tmp = scene.getTrainCameras()[0]
     on_the_fly_obj = OnTheFly(tmp.image_width, tmp.image_height, dataset.sh_degree,
-                              scene.scene_info.point_cloud, scene.scene_info)
+                              scene.scene_info)
 
     """
     Setup PBR components
