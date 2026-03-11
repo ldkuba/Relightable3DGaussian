@@ -21,10 +21,8 @@ from scene.direct_light_map import DirectLightMap
 from utils.graphics_utils import rgb_to_srgb
 from torchvision.utils import save_image, make_grid
 from lpipsPyTorch import lpips
-from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
 from on_the_fly import OnTheFly
 
-import time
 
 def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, on_the_fly_args: OnTheFlyParams, wandb_run=None):
     torch.cuda.memory._record_memory_history()
@@ -49,10 +47,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 #        gaussians.create_from_pcd(scene.scene_info.point_cloud, scene.cameras_extent)
 
     gaussians.training_setup(opt)
-
-    tmp = scene.getTrainCameras()[0]
-    on_the_fly_obj = OnTheFly(tmp.image_width, tmp.image_height, dataset.sh_degree,
-                              on_the_fly_args, scene.scene_info)
 
     """
     Setup PBR components
@@ -83,6 +77,12 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     render_fn = render_fn_dict[args.type]
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    tmp = scene.getTrainCameras()[0]
+    on_the_fly_obj = OnTheFly(width=tmp.image_width, height=tmp.image_height, max_sh_degree=dataset.sh_degree,
+                              otfp=on_the_fly_args, dataset=dataset, args=args, scene_info=scene.scene_info, render_fn=render_fn, pipe=pipe, pbr_kwargs=pbr_kwargs, opt=opt)
+
+    on_the_fly_obj.init_neighbourhood(scene.getTrainCameras())
 
     """ Prepare Diff-SPSR if enabled """
     if args.diff_spsr:

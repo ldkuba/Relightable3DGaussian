@@ -79,6 +79,7 @@ class OnTheFlyParams(ParamGroup):
         self.knn_n = 8
         self.knn_stride = 1
         self.knn_epsilon = 1e-6
+        self.neighbourhood_angle_criteria = 0.5235987755982988
         super().__init__(parser, "Pipeline Parameters")
 
 

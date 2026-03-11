@@ -7,8 +7,11 @@ import torch
 import torch.nn.functional as F
 
 from simple_knn._C import distCUDA2
+from sympy.benchmarks.bench_discrete_log import data_set_1
 
 from external.Relightable3DGaussian.arguments import OnTheFlyParams
+from external.Relightable3DGaussian.scene.gaussian_model import GaussianModel
+from external.Relightable3DGaussian.utils.loss_utils import gaussian
 from utils.general_utils import inverse_sigmoid
 from utils.sh_utils import RGB2SH
 
@@ -46,10 +49,9 @@ class GaussianBatch(NamedTuple):
 #        self.knn_epsilon = 1e-6
 #        super().__init__(parser, "Pipeline Parameters")
 
-
 class OnTheFly:
 
-    def __init__(self, width, height, max_sh_degree, otfp: OnTheFlyParams, scene_info = None, bg = 0.0):
+    def __init__(self, width, height, max_sh_degree, otfp: OnTheFlyParams, dataset, args, render_fn, pipe, opt, pbr_kwargs, scene_info = None, bg = 0.0):
 
         # set device
         self.DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -63,7 +65,14 @@ class OnTheFly:
         self.knn_n = otfp.knn_n
         self.knn_stride = otfp.knn_stride
         self.knn_epsilon = otfp.knn_epsilon
+        self.neighbourhood_angle = otfp.neighbourhood_angle_criteria
 
+
+        self.dataset = dataset
+        self.args = args
+        self.pipe = pipe
+        self.opt = opt
+        self.pbr_kwargs = pbr_kwargs
 
         self.width = width
         self.height = height
@@ -110,8 +119,14 @@ class OnTheFly:
         self.to_save_tmp = np.zeros((0, 3))
         self.colmap_to_save_tmp = np.zeros((0, 3))
 
+        self.gaussian_batches = dict()
+
+        self.render_fn = render_fn
+
+        self.neighbourhood = dict()
+
     @torch.no_grad()
-    def create_prob_map(self, img):
+    def create_density_map(self, img):
         """Creates a probability map, reference add_new_gaussians in scene_model from on the fly
         - kernel is eq. 1 in paper"""
         img = F.avg_pool2d(img, 2)
@@ -119,11 +134,6 @@ class OnTheFly:
             img[None], (self.height, self.width), mode="bilinear", align_corners=True
         )[0]
         prob_mask = self.get_lapla_norm(img, self.disc_kernel)  # eq. 1
-
-        prob_mask += self.base_prob
-
-        if self.normalize_prob:
-            prob_mask = prob_mask / torch.max(prob_mask)
 
         return prob_mask
 
@@ -148,8 +158,22 @@ class OnTheFly:
 
         image_mask = torch.squeeze(cam.image_mask).to(device=c2w.device)
 
+        # prob_mask config
+        prob_mask += self.base_prob
+
+        if self.normalize_prob:
+            prob_mask = prob_mask / torch.max(prob_mask)
+
+        # apply penalty to prob_mask
+        penalty = self.create_density_map(self.render_img(cam))
+
+        if self.normalize_prob:
+            penalty = penalty / torch.max(penalty)
+
+        penalized = prob_mask - penalty
+
         # generate probability mask
-        sample_mask = torch.rand_like(prob_mask) < prob_mask
+        sample_mask = torch.rand_like(penalized) < penalized
         sample_mask = image_mask.to(torch.bool) & sample_mask
 
         # solely for vizual debugging, set background to mean of object
@@ -239,11 +263,14 @@ class OnTheFly:
         normal_gradient_accum = torch.zeros((world_points.shape[0], 1), device="cuda")
         denom = torch.zeros((world_points.shape[0], 1), device="cuda")
 
-        return GaussianBatch(
+        gaussian_batch = GaussianBatch(
             means=world_points, scales=scales, rotations=rots, normals=normals, shs_dc=shs_dc, shs_rest=shs_rest,
             opacities=opacities, max_radii2D=max_radii2D, weights=weights, xyz_gradient_accum=xyz_gradient_accum,
-            normal_gradient_accum=normal_gradient_accum, denom=denom
-        )
+            normal_gradient_accum=normal_gradient_accum, denom=denom)
+
+        self.gaussian_batches[cam.image_name] = gaussian_batch
+
+        return gaussian_batch
 
     def check_and_set_cam(self, uid):
         if uid in self.camera_processed:
@@ -342,13 +369,15 @@ class OnTheFly:
     def add_gaussians(self, gaussians, viewpoint_cam):
         if len(self.scene_info.key_points.get(f'{viewpoint_cam.image_name}.png')[0]) < self.feature_threshold:
             return
-        prob_mask = self.create_prob_map(viewpoint_cam.original_image)
+        prob_mask = self.create_density_map(viewpoint_cam.original_image)
         depth_mask = self.generate_depth_map(viewpoint_cam.original_image)
         if self.scene_info is not None:
             depth_mask = self.adjust_depth_map(viewpoint_cam, depth_mask)
         gaussian_batch = self.generate_gaussians(prob_mask, depth_mask, viewpoint_cam)
 
         gaussians.add_on_the_fly_gaussians(gaussian_batch)
+
+        self.render_img(viewpoint_cam)
 
     def save(self):
         print("self.to_save_tmp.shape: ", self.to_save_tmp.shape)
@@ -381,3 +410,40 @@ class OnTheFly:
         laplacian_norm[..., 0, :] = 0
         laplacian_norm[..., -1, :] = 0
         return F.conv2d(laplacian_norm, kernel, padding="same")[0, 0].clamp(0, 1)
+
+    @torch.no_grad()
+    def render_img(self, viewpoint_cam):
+        gaussian_model = GaussianModel(self.dataset.sh_degree, render_type=self.args.type)
+        gaussian_model.training_setup(self.opt)
+
+        cnt = 0
+        for cam_neighbour in self.neighbourhood[viewpoint_cam.image_name]:
+            if cam_neighbour in self.gaussian_batches:
+                gaussian_model.add_on_the_fly_gaussians(self.gaussian_batches[cam_neighbour])
+                cnt += 1
+
+        if cnt == 0:
+            return torch.zeros(viewpoint_cam.original_image.shape)
+
+        render_pkg = self.render_fn(viewpoint_cam, gaussian_model, self.pipe, torch.tensor(self.bg, dtype=torch.float32, device="cuda"),
+                               opt=self.opt, is_training=False, dict_params=self.pbr_kwargs, iteration=-1)
+
+        return render_pkg["render"]
+
+    def init_neighbourhood(self, train_cameras):
+        for cam1 in train_cameras:
+            self.neighbourhood[cam1.image_name] = []
+            for cam2 in train_cameras:
+                if cam1.image_name == cam2.image_name:
+                    continue
+                prim_axis1 = cam1.get_primary_axis().detach().cpu().numpy() / np.linalg.norm(cam1.get_primary_axis().detach().cpu().numpy())
+                prim_axis2 = cam2.get_primary_axis().detach().cpu().numpy() / np.linalg.norm(cam2.get_primary_axis().detach().cpu().numpy())
+                if np.dot(prim_axis1, prim_axis2) > np.cos(self.neighbourhood_angle):
+                    self.neighbourhood[cam1.image_name].append(cam2.image_name)
+
+        for key in self.neighbourhood.keys():
+            print(f"{key}:")
+            for val in self.neighbourhood[key]:
+                print(val)
+
+
