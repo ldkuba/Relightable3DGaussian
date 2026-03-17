@@ -2,6 +2,8 @@ from argparse import ArgumentParser, Namespace
 import sys
 import os
 
+import numpy as np
+
 
 class GroupParams:
     pass
@@ -79,7 +81,8 @@ class OnTheFlyParams(ParamGroup):
         self.knn_n = 8
         self.knn_stride = 1
         self.knn_epsilon = 1e-6
-        self.neighbourhood_angle_criteria = 0.5235987755982988
+        self.neighbourhood_angle_criteria = np.pi / 6
+        self.dav2_target_width = 770
         super().__init__(parser, "Pipeline Parameters")
 
 

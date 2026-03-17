@@ -38,14 +38,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         print("Create Gaussians from checkpoint {}".format(args.checkpoint))
         first_iter = gaussians.create_from_ckpt(args.checkpoint, restore_optimizer=True)
 
-    elif scene.loaded_iter:
-        gaussians.load_ply(os.path.join(dataset.model_path,
-                                        "point_cloud",
-                                        "iteration_" + str(scene.loaded_iter),
-                                        "point_cloud.ply"))
-#    else:
-#        gaussians.create_from_pcd(scene.scene_info.point_cloud, scene.cameras_extent)
-
     gaussians.training_setup(opt)
 
     """

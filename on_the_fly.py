@@ -66,6 +66,7 @@ class OnTheFly:
         self.knn_stride = otfp.knn_stride
         self.knn_epsilon = otfp.knn_epsilon
         self.neighbourhood_angle = otfp.neighbourhood_angle_criteria
+        self.dav2_target_width = otfp.dav2_target_width
 
 
         self.dataset = dataset
@@ -141,7 +142,7 @@ class OnTheFly:
     def generate_depth_map(self, img):
         detached = img.cpu().detach().numpy()
         detached = detached.transpose(1, 2, 0)
-        depth = self.model.infer_image(detached * 255, input_size=self.width)
+        depth = self.model.infer_image(detached * 255, input_size=self.dav2_target_width)
 
         return torch.from_numpy(depth).to(img.device)
 
@@ -377,8 +378,6 @@ class OnTheFly:
 
         gaussians.add_on_the_fly_gaussians(gaussian_batch)
 
-        self.render_img(viewpoint_cam)
-
     def save(self):
         print("self.to_save_tmp.shape: ", self.to_save_tmp.shape)
         with open(os.path.expanduser("~/gaussian-splatting/pcd/world.npy"), "wb") as f:
@@ -393,6 +392,7 @@ class OnTheFly:
 
     """
     from on the fly
+    TODO cite
     """
     def get_lapla_norm(self, img, kernel):
         laplacian_kernel = (

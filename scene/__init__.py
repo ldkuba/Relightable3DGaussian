@@ -57,6 +57,7 @@ class Scene:
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval,
                                                           debug=args.debug_cuda)
+            scene_info = self.load_colmap(scene_info, args)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             if "stanford_orb" in args.source_path:
                 print("Found keyword stanford_orb, assuming Stanford ORB data set!")
@@ -70,17 +71,13 @@ class Scene:
                 print("Found transforms_train.json file, assuming Blender data set!")
                 scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, 
                                                                debug=args.debug_cuda)
-                if os.path.exists(os.path.join(args.source_path, "colmap")):
-                    print("Found additional colmap data!")
-                    extrinsics_path = os.path.join(args.source_path, "colmap/sparse/0/")
-                    p3ids, xyzs, errors, colmap_key_features = sceneLoadTypeCallbacks["AdditionalColmap"](extrinsics_path)
-                    scene_info = set_key_points(scene_info, colmap_key_features, p3ids, xyzs, errors)
-                    print("loaded add colmap data")
+                scene_info = self.load_colmap(scene_info, args)
 
         elif os.path.exists(os.path.join(args.source_path, "inputs/sfm_scene.json")):
             print("Found sfm_scene.json file, assuming NeILF data set!")
             scene_info = sceneLoadTypeCallbacks["NeILF"](args.source_path, args.white_background, args.eval,
                                                          debug=args.debug_cuda)
+            scene_info = self.load_colmap(scene_info, args)
         else:
             assert False, "Could not recognize scene type!"
 
@@ -124,3 +121,12 @@ class Scene:
 
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]
+
+    def load_colmap(self, scene_info, args):
+        if os.path.exists(os.path.join(args.source_path, "colmap")) or os.path.exists(os.path.join(args.source_path, "sparse")):
+            print("Found additional colmap data!")
+            extrinsics_path = os.path.join(args.source_path, "colmap/sparse/0/") if os.path.exists(os.path.join(args.source_path, "colmap")) else os.path.join(args.source_path, "sparse/0/")
+            p3ids, xyzs, errors, colmap_key_features = sceneLoadTypeCallbacks["AdditionalColmap"](extrinsics_path)
+            scene_info = set_key_points(scene_info, colmap_key_features, p3ids, xyzs, errors)
+            print("loaded add colmap data")
+        return scene_info
