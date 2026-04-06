@@ -1,5 +1,8 @@
+import inspect
 import os
 import sys
+import urllib.request
+from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
@@ -7,21 +10,34 @@ import torch
 import torch.nn.functional as F
 
 from simple_knn._C import distCUDA2
-from sympy.benchmarks.bench_discrete_log import data_set_1
 
 from external.Relightable3DGaussian.arguments import OnTheFlyParams
 from external.Relightable3DGaussian.scene.gaussian_model import GaussianModel
-from external.Relightable3DGaussian.utils.loss_utils import gaussian
 from utils.general_utils import inverse_sigmoid
 from utils.sh_utils import RGB2SH
 
 from PIL import Image
 
-from scipy.spatial import cKDTree as KDTree, cKDTree
+from scipy.spatial import cKDTree
 
-sys.path.append("external/on_the_fly_nvs/submodules/Depth-Anything-V2")
+DA_ROOT = Path("/home/people/adeak/gaussian-splatting/external/on_the_fly_nvs/submodules/Depth-Anything-V2").resolve()
+DA_METRIC = (DA_ROOT / "metric_depth").resolve()
+
+# Remove any existing Depth-Anything paths first
+sys.path = [
+    p for p in sys.path
+    if Path(p).resolve() not in {DA_ROOT, DA_METRIC}
+]
+
+# Put the NON-metric repo root first
+sys.path.insert(0, str(DA_ROOT))
+
+# Clear already-imported cached modules
+for k in list(sys.modules):
+    if k == "depth_anything_v2" or k.startswith("depth_anything_v2."):
+        del sys.modules[k]
+
 from depth_anything_v2.dpt import DepthAnythingV2
-
 class GaussianBatch(NamedTuple):
     means: torch.Tensor
     scales: torch.Tensor
@@ -35,19 +51,6 @@ class GaussianBatch(NamedTuple):
     xyz_gradient_accum: torch.Tensor
     normal_gradient_accum: torch.Tensor
     denom: torch.Tensor
-
-#class OnTheFlyParams(ParamGroup):
-#    def __init__(self, parser):
-#        self.on_the_fly = False
-#        self.knn_p = 2
-#        self.error_threshold = 0.75
-#        self.feature_threshold = 500
-#        self.base_prob = 0.025
-#        self.normalize_prob = False
-#        self.knn_n = 8
-#        self.knn_stride = 1
-#        self.knn_epsilon = 1e-6
-#        super().__init__(parser, "Pipeline Parameters")
 
 class OnTheFly:
 
@@ -111,6 +114,14 @@ class OnTheFly:
 
         encoder = 'vitl'
 
+        ckpt = f"models/depth_anything_v2_{encoder}.pth"
+        url = "https://huggingface.co/depth-anything/Depth-Anything-V2-Large/resolve/main/depth_anything_v2_vitl.pth?download=true"
+
+        os.makedirs("models", exist_ok=True)
+        if not os.path.exists(ckpt):
+            print(f"Downloading {ckpt} ...")
+            urllib.request.urlretrieve(url, ckpt)
+
         self.model = DepthAnythingV2(**model_configs[encoder])
         self.model.load_state_dict(torch.load(f'models/depth_anything_v2_{encoder}.pth', map_location='cpu'))
         self.model = self.model.to(self.DEVICE).eval()
@@ -125,6 +136,8 @@ class OnTheFly:
         self.render_fn = render_fn
 
         self.neighbourhood = dict()
+
+        print("DepthAnythingV2 class file:", inspect.getfile(DepthAnythingV2))
 
     @torch.no_grad()
     def create_density_map(self, img):
@@ -160,7 +173,7 @@ class OnTheFly:
         image_mask = torch.squeeze(cam.image_mask).to(device=c2w.device)
 
         # prob_mask config
-        prob_mask += self.base_prob
+        prob_mask = torch.clamp(prob_mask, min=self.base_prob)
 
         if self.normalize_prob:
             prob_mask = prob_mask / torch.max(prob_mask)
@@ -202,10 +215,6 @@ class OnTheFly:
         unproj = torch.linalg.inv(cam.intrinsics).T
 
         cam_world = pre_intrinsics @ unproj
-
-        # debug
-        with open(os.path.expanduser("~/gaussian-splatting/pcd/snap_np.npy"), "wb") as f:
-            np.save(f, cam_world.detach().cpu().numpy())
 
         print("cam.image_name", cam.image_name)
 
@@ -304,7 +313,6 @@ class OnTheFly:
 
         D_rel = depth_map.detach().cpu().numpy()
         xyzs_camera_world = (np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy())
-        self.colmap_to_save_tmp = np.concatenate((self.colmap_to_save_tmp, xyzs_camera_world[:,:3]), axis=0)
 
         xyzs_camera_world = xyzs_camera_world[:,:3] @ viewpoint_cam.intrinsics.T.detach().cpu().numpy()
         D_sfm = 1.0 / xyzs_camera_world[:,2]
@@ -440,10 +448,3 @@ class OnTheFly:
                 prim_axis2 = cam2.get_primary_axis().detach().cpu().numpy() / np.linalg.norm(cam2.get_primary_axis().detach().cpu().numpy())
                 if np.dot(prim_axis1, prim_axis2) > np.cos(self.neighbourhood_angle):
                     self.neighbourhood[cam1.image_name].append(cam2.image_name)
-
-        for key in self.neighbourhood.keys():
-            print(f"{key}:")
-            for val in self.neighbourhood[key]:
-                print(val)
-
-
