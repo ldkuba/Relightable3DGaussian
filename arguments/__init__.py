@@ -83,6 +83,9 @@ class OnTheFlyParams(ParamGroup):
         self.knn_epsilon = 1e-6
         self.neighbourhood_angle_criteria = np.pi / 6
         self.dav2_target_width = 770
+        self.feature_sigma = 50
+        self.feature_min_coverage = 0.05
+        self.feature_gate_mode = "multiply" # 'multiply' or 'hard'
         super().__init__(parser, "Pipeline Parameters")
 
 

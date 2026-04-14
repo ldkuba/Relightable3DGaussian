@@ -71,6 +71,10 @@ class OnTheFly:
         self.neighbourhood_angle = otfp.neighbourhood_angle_criteria
         self.dav2_target_width = otfp.dav2_target_width
 
+        self.feature_sigma = otfp.feature_sigma  # blur radius in pixels
+        self.feature_min_coverage = otfp.feature_min_coverage
+        self.feature_gate_mode = otfp.feature_gate_mode
+        # "multiply" or "hard"
 
         self.dataset = dataset
         self.args = args
@@ -139,6 +143,8 @@ class OnTheFly:
 
         print("DepthAnythingV2 class file:", inspect.getfile(DepthAnythingV2))
 
+        self.feature_kernel = self._make_gaussian_kernel(self.feature_sigma).to(self.DEVICE)
+
     @torch.no_grad()
     def create_density_map(self, img):
         """Creates a probability map, reference add_new_gaussians in scene_model from on the fly
@@ -178,13 +184,15 @@ class OnTheFly:
         if self.normalize_prob:
             prob_mask = prob_mask / torch.max(prob_mask)
 
+        covered_prob_mask, feature_coverage = self.apply_feature_gating(prob_mask, cam)
+
         # apply penalty to prob_mask
         penalty = self.create_density_map(self.render_img(cam))
 
         if self.normalize_prob:
             penalty = penalty / torch.max(penalty)
 
-        penalized = prob_mask - penalty
+        penalized = covered_prob_mask - penalty
 
         # generate probability mask
         sample_mask = torch.rand_like(penalized) < penalized
@@ -215,8 +223,6 @@ class OnTheFly:
         unproj = torch.linalg.inv(cam.intrinsics).T
 
         cam_world = pre_intrinsics @ unproj
-
-        print("cam.image_name", cam.image_name)
 
         # put reconstruction into world space
         homo_ones = torch.ones((cam_world.shape[0], 1))
@@ -279,6 +285,8 @@ class OnTheFly:
             normal_gradient_accum=normal_gradient_accum, denom=denom)
 
         self.gaussian_batches[cam.image_name] = gaussian_batch
+
+#        self.render_single_img(cam, gaussian_batch, f"pcd/rendered/{cam.image_name}.png")
 
         return gaussian_batch
 
@@ -438,6 +446,33 @@ class OnTheFly:
 
         return render_pkg["render"]
 
+    @torch.no_grad()
+    def render_single_img(self, viewpoint_cam, gaussian_batch, save_path=None):
+        gaussian_model = GaussianModel(self.dataset.sh_degree, render_type=self.args.type)
+        gaussian_model.training_setup(self.opt)
+
+        gaussian_model.add_on_the_fly_gaussians(gaussian_batch)
+
+        render_pkg = self.render_fn(
+            viewpoint_cam,
+            gaussian_model,
+            self.pipe,
+            torch.tensor(self.bg, dtype=torch.float32, device="cuda"),
+            opt=self.opt,
+            is_training=False,
+            dict_params=self.pbr_kwargs,
+            iteration=-1,
+        )
+
+        render = render_pkg["render"]  # expected shape: [C, H, W]
+
+        if save_path is not None:
+            img = render.detach().clamp(0, 1).permute(1, 2, 0).cpu().numpy()  # HWC
+            img = (img * 255).astype(np.uint8)
+            Image.fromarray(img).save(save_path)
+
+        return render
+
     def init_neighbourhood(self, train_cameras):
         for cam1 in train_cameras:
             self.neighbourhood[cam1.image_name] = []
@@ -448,3 +483,71 @@ class OnTheFly:
                 prim_axis2 = cam2.get_primary_axis().detach().cpu().numpy() / np.linalg.norm(cam2.get_primary_axis().detach().cpu().numpy())
                 if np.dot(prim_axis1, prim_axis2) > np.cos(self.neighbourhood_angle):
                     self.neighbourhood[cam1.image_name].append(cam2.image_name)
+
+    def _make_gaussian_kernel(self, sigma: float, truncate: float = 3.0):
+        radius = int(truncate * sigma + 0.5)
+        coords = torch.arange(-radius, radius + 1, dtype=torch.float32)
+        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+        g = g / g.sum()
+        kernel2d = torch.outer(g, g)
+        kernel2d = kernel2d / kernel2d.sum()
+        return kernel2d[None, None]  # [1,1,H,W]
+
+
+    @torch.no_grad()
+    def get_feature_coverage_map(self, viewpoint_cam):
+        """
+        Returns a blurred feature support map in [0, 1], shape [H, W].
+        High values mean: this pixel is near matched keypoints / SfM support.
+        """
+        key_points = self.scene_info.key_points.get(f"{viewpoint_cam.image_name}.png")
+        if key_points is None or len(key_points[0]) == 0:
+            return torch.zeros((self.height, self.width), device=self.DEVICE)
+
+        uv = key_points[1]  # shape [N, 2], assumed (u, v)
+        uv = np.round(uv).astype(np.int32)
+
+        valid = (
+            (uv[:, 0] >= 0) & (uv[:, 0] < self.width) &
+            (uv[:, 1] >= 0) & (uv[:, 1] < self.height)
+        )
+        uv = uv[valid]
+
+        if len(uv) == 0:
+            return torch.zeros((self.height, self.width), device=self.DEVICE)
+
+        feat_map = torch.zeros((1, 1, self.height, self.width), device=self.DEVICE)
+        u = torch.from_numpy(uv[:, 0]).long().to(self.DEVICE)
+        v = torch.from_numpy(uv[:, 1]).long().to(self.DEVICE)
+
+        feat_map[0, 0, v, u] = 1.0
+
+        # Blur sparse impulses into a smooth coverage field
+        pad_h = self.feature_kernel.shape[-2] // 2
+        pad_w = self.feature_kernel.shape[-1] // 2
+        coverage = F.conv2d(feat_map, self.feature_kernel, padding=(pad_h, pad_w))[0, 0]
+
+        # Normalize to [0, 1]
+        maxv = coverage.max()
+        if maxv > 0:
+            coverage = coverage / maxv
+
+        return coverage
+
+
+    @torch.no_grad()
+    def apply_feature_gating(self, prob_mask, viewpoint_cam):
+        coverage = self.get_feature_coverage_map(viewpoint_cam)
+
+        image_mask = torch.squeeze(viewpoint_cam.image_mask).to(device=prob_mask.device).bool()
+        coverage = coverage * image_mask.float()
+
+        if self.feature_gate_mode == "multiply":
+            gated = prob_mask * coverage
+        elif self.feature_gate_mode == "hard":
+            gated = prob_mask.clone()
+            gated[coverage < self.feature_min_coverage] = 0.0
+        else:
+            raise ValueError(f"Unknown feature_gate_mode: {self.feature_gate_mode}")
+
+        return gated, coverage

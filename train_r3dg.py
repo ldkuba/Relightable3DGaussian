@@ -127,7 +127,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                     on_the_fly_obj.add_gaussians(gaussians, viewpoint_cam)
                 print("num: ", gaussians.get_xyz.shape[0])
 
-        on_the_fly_obj.save()
     torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
     for iteration in progress_bar:
         gaussians.update_learning_rate(iteration)
