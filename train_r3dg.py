@@ -164,11 +164,26 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         tb_dict = render_pkg["tb_dict"]
         loss += render_pkg["loss"]
 
+#        if wandb_run is not None:
+#            wandb_run.log({
+#                "psnr": tb_dict['psnr'],
+#                "ssim": tb_dict['ssim']
+#            }, step=iteration)
+
         if wandb_run is not None:
-            wandb_run.log({
-                "psnr": tb_dict['psnr'],
-                "ssim": tb_dict['ssim']
-            }, step=iteration)
+            print("asdf")
+            on_the_fly_obj.log_rendered_view_metrics_summary(
+                global_step=iteration,
+                split_name="test",
+                cameras=scene.getTrainCameras(),
+                gaussians=scene.gaussians,
+                render_fn=render_fn,
+                pipe=pipe,
+                background=background,
+                opt=opt,
+                wandb_run=wandb_run,
+                **pbr_kwargs,
+            )
 
         # Diff-SPSR
         if args.diff_spsr:

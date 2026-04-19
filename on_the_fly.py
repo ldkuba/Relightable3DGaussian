@@ -1,6 +1,7 @@
 import inspect
 import os
 import sys
+import time
 import urllib.request
 from pathlib import Path
 from typing import NamedTuple
@@ -10,10 +11,13 @@ import torch
 import torch.nn.functional as F
 
 from simple_knn._C import distCUDA2
+from tqdm import tqdm
 
 from external.Relightable3DGaussian.arguments import OnTheFlyParams
 from external.Relightable3DGaussian.scene.gaussian_model import GaussianModel
 from utils.general_utils import inverse_sigmoid
+from utils.image_utils import psnr
+from utils.loss_utils import ssim
 from utils.sh_utils import RGB2SH
 
 from PIL import Image
@@ -286,8 +290,6 @@ class OnTheFly:
 
         self.gaussian_batches[cam.image_name] = gaussian_batch
 
-#        self.render_single_img(cam, gaussian_batch, f"pcd/rendered/{cam.image_name}.png")
-
         return gaussian_batch
 
     def check_and_set_cam(self, uid):
@@ -315,10 +317,6 @@ class OnTheFly:
         u = uv[:,0]
         v = uv[:,1]
 
-        with open(os.path.expanduser(f"~/gaussian-splatting/pcd/colmaps/{viewpoint_cam.image_name}.npy"), "wb") as f:
-            np.save(f, xyzs)
-
-
         D_rel = depth_map.detach().cpu().numpy()
         xyzs_camera_world = (np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy())
 
@@ -333,11 +331,9 @@ class OnTheFly:
         D = (s_sfm / s_rel) * D_rel + t_sfm - t_rel * (s_sfm / s_rel)
         D = np.clip(D, 1e-6, 1e6)
         D = 1.0 / D
+
         D = self.adjust_depth_knn(D, uv, xyzs_camera_world[:,2], k=self.knn_n, stride=self.knn_stride, p=self.knn_p, eps=self.knn_epsilon)
-        img_D = D.copy()
-        self.save_img(img_D, f"{viewpoint_cam.image_name}_cor")
-        img_dav2 = depth_map.detach().cpu().numpy()
-        self.save_img(img_dav2, f"{viewpoint_cam.image_name}_dav2", inv=True)
+
         return torch.from_numpy(D).to(device=depth_map.device)
 
     def save_img(self, img_D, name, inv=False):
@@ -387,7 +383,9 @@ class OnTheFly:
         if len(self.scene_info.key_points.get(f'{viewpoint_cam.image_name}.png')[0]) < self.feature_threshold:
             return
         prob_mask = self.create_density_map(viewpoint_cam.original_image)
+
         depth_mask = self.generate_depth_map(viewpoint_cam.original_image)
+
         if self.scene_info is not None:
             depth_mask = self.adjust_depth_map(viewpoint_cam, depth_mask)
         gaussian_batch = self.generate_gaussians(prob_mask, depth_mask, viewpoint_cam)
@@ -551,3 +549,72 @@ class OnTheFly:
             raise ValueError(f"Unknown feature_gate_mode: {self.feature_gate_mode}")
 
         return gated, coverage
+
+    @torch.no_grad()
+    def log_rendered_view_metrics_summary(
+            self,
+            global_step,
+            split_name,
+            cameras,
+            gaussians,
+            render_fn,
+            pipe,
+            background,
+            opt,
+            wandb_run=None,
+            use_pbr_if_available=True,
+            **pbr_kwargs,
+    ):
+        if cameras is None or len(cameras) == 0:
+            print("duck")
+            return {}
+
+        psnr_values = []
+        ssim_values = []
+
+        for viewpoint in cameras:
+            results = render_fn(
+                viewpoint,
+                gaussians,
+                pipe,
+                background,
+                opt=opt,
+                is_training=False,
+                dict_params=pbr_kwargs,
+            )
+
+            if use_pbr_if_available and getattr(gaussians, "use_pbr", False) and "pbr" in results:
+                pred = results["pbr"]
+            else:
+                pred = results["render"]
+
+            pred = torch.clamp(pred, 0.0, 1.0)
+            gt = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+
+            psnr_val = psnr(pred, gt).mean().detach()
+            ssim_val = ssim(pred, gt).mean().detach()
+
+            psnr_values.append(psnr_val)
+            ssim_values.append(ssim_val)
+
+        psnr_tensor = torch.stack(psnr_values).float()
+        ssim_tensor = torch.stack(ssim_values).float()
+
+        metrics = {
+            f"{split_name}/psnr_avg": psnr_tensor.mean().item(),
+            f"{split_name}/psnr_max": psnr_tensor.max().item(),
+            f"{split_name}/psnr_min": psnr_tensor.min().item(),
+            f"{split_name}/psnr_median": psnr_tensor.median().item(),
+            f"{split_name}/ssim_avg": ssim_tensor.mean().item(),
+            f"{split_name}/ssim_max": ssim_tensor.max().item(),
+            f"{split_name}/ssim_min": ssim_tensor.min().item(),
+            f"{split_name}/ssim_median": ssim_tensor.median().item(),
+        }
+
+        if wandb_run is not None:
+            print(f"Logging to wandb at step {global_step}: {metrics}")
+            wandb_run.log(metrics, step=global_step)
+            print("asdf3")
+        print("asdf2")
+
+        return metrics
