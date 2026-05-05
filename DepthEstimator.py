@@ -176,18 +176,17 @@ class DepthEstimator:
             return depth_map
 
         uv = np.round(uv).astype(dtype=np.int32)
-        xyzs_camera_world = np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy()
-        xyzs_camera_world = xyzs_camera_world[:, :3] @ viewpoint_cam.intrinsics.T.detach().cpu().numpy()
+        xyzs_cam_space = np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy()
 
 
         if self.adjust_by_median:
-            depth_map = self.adjust_depth_median(depth_map, uv, xyzs_camera_world[:,2])
+            depth_map = self.adjust_depth_median(depth_map, uv, xyzs_cam_space[:,2])
 
         if self.adjust_by_knn:
             depth_map_np = self.adjust_depth_knn(
                 depth_map.detach().cpu().numpy(),
                 uv,
-                xyzs_camera_world[:, 2],
+                xyzs_cam_space[:, 2],
             )
             depth_map = torch.from_numpy(depth_map_np).to(device=depth_map.device)
 
