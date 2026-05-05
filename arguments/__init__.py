@@ -82,7 +82,8 @@ class OnTheFlyParams(ParamGroup):
         self.knn_stride = 1
         self.knn_epsilon = 1e-6
         self.adjust_by_median = False
-        self.adjust_by_knn = False
+        self.adjust_by_scipy_cKDTree = False
+        self.adjust_by_pytorch3d_knn_points = False
         self.neighbourhood_angle_criteria = np.pi / 6
         self.dav2_target_width = 770
         self.feature_sigma = 50

@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.spatial import cKDTree
+from pytorch3d.ops import knn_points
 
 DA_ROOT = Path("/home/people/adeak/gaussian-splatting/external/on_the_fly_nvs/submodules/Depth-Anything-V2").resolve()
 DA_METRIC = (DA_ROOT / "metric_depth").resolve()
@@ -64,8 +65,9 @@ class DepthEstimator:
         self.p3ids = p3ids
         self.xyzs = xyzs
 
-        self.adjust_by_knn = otfp.adjust_by_knn
+        self.adjust_by_pytorch3d_knn_points = otfp.adjust_by_pytorch3d_knn_points
         self.adjust_by_median = otfp.adjust_by_median
+        self.adjust_by_scipy_cKDTree = otfp.adjust_by_scipy_cKDTree
 
         # Depth-Anything-V2 normalization constants.
         self._dav2_mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32, device=self.DEVICE).view(1, 3, 1, 1)
@@ -180,6 +182,42 @@ class DepthEstimator:
         return D
 
     @torch.no_grad()
+    def adjust_depth_pytorch3d_knn(self, depth_map, uv_desc, z_sfm):
+        if len(uv_desc) == 0:
+            return depth_map
+
+        device = depth_map.device
+        dtype = depth_map.dtype
+        H, W = depth_map.shape
+
+        uv_desc_t = torch.as_tensor(uv_desc, device=device, dtype=torch.float32)
+        z_sfm_t = torch.as_tensor(z_sfm, device=device, dtype=dtype)
+
+        uv_idx = uv_desc_t.long()
+        u = uv_idx[:, 0]
+        v = uv_idx[:, 1]
+        z_map = depth_map[v, u]
+        delta = z_sfm_t - z_map
+
+        ys = torch.arange(0, H, self.knn_stride, device=device, dtype=torch.float32)
+        xs = torch.arange(0, W, self.knn_stride, device=device, dtype=torch.float32)
+        gy, gx = torch.meshgrid(ys, xs, indexing="ij")
+        Q = torch.stack((gx.reshape(-1), gy.reshape(-1)), dim=1)
+
+        kk = min(self.knn_n, uv_desc_t.shape[0])
+        knn = knn_points(Q[None], uv_desc_t[None], K=kk, return_sorted=False)
+        dists = torch.sqrt(torch.clamp(knn.dists[0], min=0.0))
+        idx = knn.idx[0]
+
+        w = 1.0 / (dists.pow(self.knn_p) + self.knn_epsilon)
+        delta_neighbors = delta[idx]
+        Delta = (w * delta_neighbors).sum(dim=1) / (w.sum(dim=1) + self.knn_epsilon)
+        Delta = Delta.reshape(ys.numel(), xs.numel())
+        Delta_full = Delta.repeat_interleave(self.knn_stride, dim=0).repeat_interleave(self.knn_stride, dim=1)[:H, :W]
+
+        return depth_map + Delta_full.to(dtype=dtype)
+
+    @torch.no_grad()
     def generate_depth_map(self, viewpoint_cam):
         depth_map = self.estimate_depth(viewpoint_cam.original_image)
 
@@ -197,12 +235,19 @@ class DepthEstimator:
         if self.adjust_by_median:
             depth_map = self.adjust_depth_median(depth_map, uv, xyzs_cam_space[:,2])
 
-        if self.adjust_by_knn:
+        if self.adjust_by_scipy_cKDTree:
             depth_map_np = self.adjust_depth_knn(
                 depth_map.detach().cpu().numpy(),
                 uv,
                 xyzs_cam_space[:, 2],
             )
             depth_map = torch.from_numpy(depth_map_np).to(device=depth_map.device)
+
+        if self.adjust_by_pytorch3d_knn_points:
+            depth_map = self.adjust_depth_pytorch3d_knn(
+                depth_map,
+                uv,
+                xyzs_cam_space[:, 2],
+            )
 
         return depth_map
