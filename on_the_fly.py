@@ -92,8 +92,6 @@ class OnTheFly:
         self.depth_estimator = DepthEstimator(otfp, scene_info, self.p3ids, self.xyzs)
         self.mask_sampler = MaskSampler(otfp, scene_info, width, height)
 
-        self.cnt = 0
-
     def generate_mask(self, img):
         return img != self.bg
 
@@ -138,10 +136,6 @@ class OnTheFly:
         world_points = world_points[:,:3]
         assert ~ torch.isnan(cam_world).any()
         assert ~ torch.isnan(world_points).any()
-
-        # debug
-        self.to_save_tmp = np.concatenate((self.to_save_tmp, world_points.detach().cpu().numpy()))
-
 
         # ++ scales ++
         filtered_prob_mask = prob_mask[sample_mask]
