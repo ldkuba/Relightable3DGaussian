@@ -64,6 +64,9 @@ class DepthEstimator:
         self.p3ids = p3ids
         self.xyzs = xyzs
 
+        self.adjust_by_knn = otfp.adjust_by_knn
+        self.adjust_by_median = otfp.adjust_by_median
+
         # Depth-Anything-V2 normalization constants.
         self._dav2_mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32, device=self.DEVICE).view(1, 3, 1, 1)
         self._dav2_std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32, device=self.DEVICE).view(1, 3, 1, 1)
@@ -110,7 +113,10 @@ class DepthEstimator:
         return np.mean(np.abs(D - tD))
 
     @torch.no_grad()
-    def adjust_depth_knn(self, D, uv_desc, z_sfm, k, stride, p, eps):
+    def adjust_depth_knn(self, D, uv_desc, z_sfm):
+        if len(uv_desc) == 0:
+            return D
+
         H, W = D.shape
 
         u = uv_desc[:, 0].astype(dtype=np.int32)
@@ -120,36 +126,32 @@ class DepthEstimator:
 
         tree = cKDTree(uv_desc)
 
-        ys = np.arange(0, H, stride, dtype=np.int32)
-        xs = np.arange(0, W, stride, dtype=np.int32)
+        ys = np.arange(0, H, self.knn_stride, dtype=np.int32)
+        xs = np.arange(0, W, self.knn_stride, dtype=np.int32)
         gx, gy = np.meshgrid(xs, ys)
         Q = np.stack([gx.ravel(), gy.ravel()], axis=1).astype(np.float32)
 
-        kk = min(k, len(uv_desc))
+        kk = min(self.knn_n, len(uv_desc))
         dists, idx = tree.query(Q, k=kk, workers=-1)
 
         if kk == 1:
             dists = dists[:, None]
             idx = idx[:, None]
 
-        w = 1.0 / (dists ** p + eps)
-        Delta = (w * delta[idx]).sum(axis=1) / (w.sum(axis=1) + eps)
+        w = 1.0 / (dists ** self.knn_p + self.knn_epsilon)
+        Delta = (w * delta[idx]).sum(axis=1) / (w.sum(axis=1) + self.knn_epsilon)
         Delta = Delta.reshape(len(ys), len(xs))
-        Delta_full = np.repeat(np.repeat(Delta, stride, axis=0), stride, axis=1)[:H, :W]
+        Delta_full = np.repeat(np.repeat(Delta, self.knn_stride, axis=0), self.knn_stride, axis=1)[:H, :W]
 
         return D + Delta_full
 
     @torch.no_grad()
-    def adjust_depth_map(self, viewpoint_cam, depth_map):
-        uv, xyzs = self.get_key_points(viewpoint_cam)
-        uv = np.round(uv).astype(dtype=np.int32)
-        u = uv[:, 0]
-        v = uv[:, 1]
+    def adjust_depth_median(self, depth_map, uv_desc, z_sfm):
+        u = uv_desc[:, 0]
+        v = uv_desc[:, 1]
 
         D_rel = depth_map.detach().cpu().numpy()
-        xyzs_camera_world = np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy()
-        xyzs_camera_world = xyzs_camera_world[:, :3] @ viewpoint_cam.intrinsics.T.detach().cpu().numpy()
-        D_sfm = 1.0 / xyzs_camera_world[:, 2]
+        D_sfm = 1.0 / z_sfm
 
         t_sfm = self.t(D_sfm)
         t_rel = self.t(D_rel[v, u])
@@ -160,23 +162,33 @@ class DepthEstimator:
         D = np.clip(D, 1e-6, 1e6)
         D = 1.0 / D
 
-        D = self.adjust_depth_knn(
-            D,
-            uv,
-            xyzs_camera_world[:, 2],
-            k=self.knn_n,
-            stride=self.knn_stride,
-            p=self.knn_p,
-            eps=self.knn_epsilon,
-        )
-
         return torch.from_numpy(D).to(device=depth_map.device)
 
     @torch.no_grad()
     def generate_depth_map(self, viewpoint_cam):
         depth_map = self.estimate_depth(viewpoint_cam.original_image)
 
-        if self.scene_info is not None:
-            depth_map = self.adjust_depth_map(viewpoint_cam, depth_map)
+        if self.scene_info is None:
+            return depth_map
+
+        uv, xyzs = self.get_key_points(viewpoint_cam)
+        if len(uv) == 0:
+            return depth_map
+
+        uv = np.round(uv).astype(dtype=np.int32)
+        xyzs_camera_world = np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy()
+        xyzs_camera_world = xyzs_camera_world[:, :3] @ viewpoint_cam.intrinsics.T.detach().cpu().numpy()
+
+
+        if self.adjust_by_median:
+            depth_map = self.adjust_depth_median(depth_map, uv, xyzs_camera_world[:,2])
+
+        if self.adjust_by_knn:
+            depth_map_np = self.adjust_depth_knn(
+                depth_map.detach().cpu().numpy(),
+                uv,
+                xyzs_camera_world[:, 2],
+            )
+            depth_map = torch.from_numpy(depth_map_np).to(device=depth_map.device)
 
         return depth_map
