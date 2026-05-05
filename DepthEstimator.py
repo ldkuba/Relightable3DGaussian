@@ -107,10 +107,18 @@ class DepthEstimator:
         return key_points[1][m2d, :], xyzs[m3d, :]
 
     def t(self, D):
-        return np.median(D)
+        if not torch.is_tensor(D):
+            D = torch.as_tensor(D)
+        return torch.median(D)
 
     def s(self, D, tD):
-        return np.mean(np.abs(D - tD))
+        if not torch.is_tensor(D):
+            D = torch.as_tensor(D)
+        if not torch.is_tensor(tD):
+            tD = torch.as_tensor(tD, device=D.device, dtype=D.dtype)
+        else:
+            tD = tD.to(device=D.device, dtype=D.dtype)
+        return torch.mean(torch.abs(D - tD))
 
     @torch.no_grad()
     def adjust_depth_knn(self, D, uv_desc, z_sfm):
@@ -147,22 +155,29 @@ class DepthEstimator:
 
     @torch.no_grad()
     def adjust_depth_median(self, depth_map, uv_desc, z_sfm):
-        u = uv_desc[:, 0]
-        v = uv_desc[:, 1]
+        device = depth_map.device
+        dtype = depth_map.dtype
 
-        D_rel = depth_map.detach().cpu().numpy()
-        D_sfm = 1.0 / z_sfm
+        uv_t = torch.as_tensor(uv_desc, device=device, dtype=torch.long)
+        u = uv_t[:, 0]
+        v = uv_t[:, 1]
 
+        D_rel = depth_map
+        z_sfm_t = torch.as_tensor(z_sfm, device=device, dtype=dtype)
+        D_sfm = 1.0 / z_sfm_t
+
+        D_rel_samples = D_rel[v, u]
         t_sfm = self.t(D_sfm)
-        t_rel = self.t(D_rel[v, u])
+        t_rel = self.t(D_rel_samples)
         s_sfm = self.s(D_sfm, t_sfm)
-        s_rel = self.s(D_rel[v, u], t_rel)
+        s_rel = self.s(D_rel_samples, t_rel)
 
-        D = (s_sfm / s_rel) * D_rel + t_sfm - t_rel * (s_sfm / s_rel)
-        D = np.clip(D, 1e-6, 1e6)
+        ratio = s_sfm / s_rel
+        D = ratio * D_rel + t_sfm - t_rel * ratio
+        D = torch.clamp(D, 1e-6, 1e6)
         D = 1.0 / D
 
-        return torch.from_numpy(D).to(device=depth_map.device)
+        return D
 
     @torch.no_grad()
     def generate_depth_map(self, viewpoint_cam):
