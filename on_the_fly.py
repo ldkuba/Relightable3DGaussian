@@ -1,4 +1,5 @@
 import os
+import math
 from typing import NamedTuple
 
 import numpy as np
@@ -279,15 +280,24 @@ class OnTheFly:
         return render
 
     def init_neighbourhood(self, train_cameras):
-        for cam1 in train_cameras:
-            self.neighbourhood[cam1.image_name] = []
-            for cam2 in train_cameras:
-                if cam1.image_name == cam2.image_name:
-                    continue
-                prim_axis1 = cam1.get_primary_axis().detach().cpu().numpy() / np.linalg.norm(cam1.get_primary_axis().detach().cpu().numpy())
-                prim_axis2 = cam2.get_primary_axis().detach().cpu().numpy() / np.linalg.norm(cam2.get_primary_axis().detach().cpu().numpy())
-                if np.dot(prim_axis1, prim_axis2) > np.cos(self.neighbourhood_angle):
-                    self.neighbourhood[cam1.image_name].append(cam2.image_name)
+        if len(train_cameras) == 0:
+            return
+
+        image_names = [cam.image_name for cam in train_cameras]
+        primary_axes = torch.stack(
+            [cam.get_primary_axis().detach() for cam in train_cameras], dim=0
+        )
+        primary_axes = torch.nn.functional.normalize(primary_axes, p=2, dim=1)
+
+        cosine_matrix = primary_axes @ primary_axes.T
+        neighbour_mask = (cosine_matrix > math.cos(self.neighbourhood_angle)).cpu().numpy()
+
+        for i, image_name in enumerate(image_names):
+            self.neighbourhood[image_name] = [
+                image_names[j]
+                for j in range(len(image_names))
+                if j != i and neighbour_mask[i, j]
+            ]
 
     @torch.no_grad()
     def log_rendered_view_metrics_summary(
