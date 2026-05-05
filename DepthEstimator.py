@@ -1,10 +1,12 @@
 import os
 import sys
 import urllib.request
+import math
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from scipy.spatial import cKDTree
 
 DA_ROOT = Path("/home/people/adeak/gaussian-splatting/external/on_the_fly_nvs/submodules/Depth-Anything-V2").resolve()
@@ -62,12 +64,33 @@ class DepthEstimator:
         self.p3ids = p3ids
         self.xyzs = xyzs
 
+        # Depth-Anything-V2 normalization constants.
+        self._dav2_mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32, device=self.DEVICE).view(1, 3, 1, 1)
+        self._dav2_std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32, device=self.DEVICE).view(1, 3, 1, 1)
+
+    def _compute_dav2_size(self, h, w):
+        # Match DA-V2 Resize(keep_aspect_ratio=True, ensure_multiple_of=14, resize_method='lower_bound').
+        scale = max(self.dav2_target_width / float(w), self.dav2_target_width / float(h))
+        new_h = max(self.dav2_target_width, int(math.ceil((h * scale) / 14.0) * 14))
+        new_w = max(self.dav2_target_width, int(math.ceil((w * scale) / 14.0) * 14))
+        return new_h, new_w
+
     @torch.no_grad()
     def estimate_depth(self, img):
-        detached = img.cpu().detach().numpy()
-        detached = detached.transpose(1, 2, 0)
-        depth = self.model.infer_image(detached * 255, input_size=self.dav2_target_width)
-        return torch.from_numpy(depth).to(img.device)
+        # Keep the whole inference path on-device to avoid GPU->CPU->GPU copies.
+        if img.dim() != 3:
+            raise ValueError(f"Expected CHW image tensor, got shape {tuple(img.shape)}")
+
+        h, w = img.shape[-2:]
+        new_h, new_w = self._compute_dav2_size(h, w)
+
+        x = img.unsqueeze(0).to(device=self.DEVICE, dtype=torch.float32)
+        x = F.interpolate(x, size=(new_h, new_w), mode="bicubic", align_corners=False)
+        x = (x - self._dav2_mean) / self._dav2_std
+
+        depth = self.model(x)
+        depth = F.interpolate(depth[:, None], size=(h, w), mode="bilinear", align_corners=True)[0, 0]
+        return depth.to(img.device)
 
     @torch.no_grad()
     def get_key_points(self, viewpoint_cam):
