@@ -45,6 +45,7 @@ class OnTheFly:
         self.knn_epsilon = otfp.knn_epsilon
         self.neighbourhood_angle = otfp.neighbourhood_angle_criteria
         self.dav2_target_width = otfp.dav2_target_width
+        self.apply_penalty_map = otfp.apply_penalty_map
 
         self.feature_sigma = otfp.feature_sigma  # blur radius in pixels
         self.feature_min_coverage = otfp.feature_min_coverage
@@ -180,7 +181,8 @@ class OnTheFly:
             means=world_points, scales=scales, rotations=rots, normals=normals, shs_dc=shs_dc, shs_rest=shs_rest,
             opacities=opacities)
 
-        self.gaussian_batches[cam.image_name] = gaussian_batch
+        if self.apply_penalty_map:
+            self.gaussian_batches[cam.image_name] = gaussian_batch
 
         return gaussian_batch
 
@@ -205,9 +207,10 @@ class OnTheFly:
 
         # generate masks
         depth_mask = self.depth_estimator.generate_depth_map(viewpoint_cam)
+        rendered_img = self.render_img(viewpoint_cam) if self.apply_penalty_map else None
         prob_mask, sample_mask, image_mask, _feature_coverage = self.mask_sampler.generate_sample_mask(
-            rendered_img=self.render_img(viewpoint_cam),
-            viewpoint_cam=viewpoint_cam
+            viewpoint_cam=viewpoint_cam,
+            rendered_img=rendered_img,
         )
 
         gaussian_batch = self.generate_gaussians(
@@ -272,6 +275,9 @@ class OnTheFly:
         return render
 
     def init_neighbourhood(self, train_cameras):
+        if not self.apply_penalty_map:
+            return
+            
         if len(train_cameras) == 0:
             return
 

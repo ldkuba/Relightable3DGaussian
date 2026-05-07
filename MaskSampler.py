@@ -17,6 +17,7 @@ class MaskSampler:
         self.height = height
         self.base_prob = otfp.base_prob
         self.normalize_prob = otfp.normalize_prob
+        self.apply_penalty_map = otfp.apply_penalty_map
 
         self.feature_sigma = otfp.feature_sigma  # blur radius in pixels
         self.truncate = 3.0
@@ -122,7 +123,7 @@ class MaskSampler:
         return prob_mask
 
     @torch.no_grad()
-    def generate_sample_mask(self, rendered_img, viewpoint_cam):
+    def generate_sample_mask(self, viewpoint_cam, rendered_img=None):
         original_img = viewpoint_cam.original_image
         prob_mask = self.create_density_map(original_img)
         prob_mask = torch.clamp(prob_mask, min=self.base_prob)
@@ -131,11 +132,15 @@ class MaskSampler:
 
         covered_prob_mask, feature_coverage = self.apply_feature_gating(prob_mask, viewpoint_cam)
 
-        penalty = self.create_density_map(rendered_img)
-        if self.normalize_prob:
-            penalty = penalty / torch.max(penalty)
+        penalized = covered_prob_mask
+        if self.apply_penalty_map:
+            if rendered_img is None:
+                raise ValueError("[MaskSampler] rendered_img must be provided when apply_penalty_map=True")
+            penalty = self.create_density_map(rendered_img)
+            if self.normalize_prob:
+                penalty = penalty / torch.max(penalty)
+            penalized = covered_prob_mask - penalty
 
-        penalized = covered_prob_mask - penalty
         image_mask = torch.squeeze(viewpoint_cam.image_mask).to(device=penalized.device).bool()
         sample_mask = (torch.rand_like(penalized) < penalized) & image_mask
         return prob_mask, sample_mask, image_mask, feature_coverage

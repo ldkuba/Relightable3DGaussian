@@ -89,6 +89,7 @@ class OnTheFlyParams(ParamGroup):
         self.feature_sigma = 50
         self.feature_min_coverage = 0.05
         self.feature_gate_mode = "multiply" # 'multiply' or 'hard'
+        self.apply_penalty_map = False
         super().__init__(parser, "Pipeline Parameters")
 
 
