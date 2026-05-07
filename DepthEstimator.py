@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from scipy.spatial import cKDTree
 from pytorch3d.ops import knn_points
 
-DA_ROOT = Path("/home/people/adeak/gaussian-splatting/external/on_the_fly_nvs/submodules/Depth-Anything-V2").resolve()
+DA_ROOT = Path("/home/people/adeak/gaussian-splatting/external//DepthAnythingV2").resolve()
 DA_METRIC = (DA_ROOT / "metric_depth").resolve()
 
 # Remove any existing Depth-Anything paths first
