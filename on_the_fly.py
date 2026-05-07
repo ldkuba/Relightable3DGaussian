@@ -208,6 +208,7 @@ class OnTheFly:
         return True
 
     def save_img(self, img_D, name, inv=False):
+        print(f"[on_the_fly] Saving depth map image {name}")
         img_D = ((img_D - img_D.min()) / (img_D.max() - img_D.min())) * 255
         if (inv):
             img_D = 255 - img_D
@@ -236,7 +237,7 @@ class OnTheFly:
         gaussians.add_on_the_fly_gaussians(gaussian_batch)
 
     def save(self):
-        print("self.to_save_tmp.shape: ", self.to_save_tmp.shape)
+        print("[on_the_fly] save means of generated gaussians - self.to_save_tmp.shape: ", self.to_save_tmp.shape)
         with open(os.path.expanduser("~/gaussian-splatting/pcd/world.npy"), "wb") as f:
             np.save(f, self.to_save_tmp)
 
@@ -323,7 +324,7 @@ class OnTheFly:
             **pbr_kwargs,
     ):
         if cameras is None or len(cameras) == 0:
-            print("duck")
+            print("[on_the_fly] Can't log rendered view metrics, since no camera views are provided.")
             return {}
 
         psnr_values = []
@@ -369,9 +370,7 @@ class OnTheFly:
         }
 
         if wandb_run is not None:
-            print(f"Logging to wandb at step {global_step}: {metrics}")
+            print(f"[on_the_fly] Logging to wandb at step {global_step}: {metrics}")
             wandb_run.log(metrics, step=global_step)
-            print("asdf3")
-        print("asdf2")
 
         return metrics

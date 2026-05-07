@@ -153,6 +153,6 @@ class MaskSampler:
             gated = prob_mask.clone()
             gated[coverage < self.feature_min_coverage] = 0.0
         else:
-            raise ValueError(f"Unknown feature_gate_mode: {self.feature_gate_mode}")
+            raise ValueError(f"[MaskSampler] Unknown feature_gate_mode: {self.feature_gate_mode}")
 
         return gated, coverage

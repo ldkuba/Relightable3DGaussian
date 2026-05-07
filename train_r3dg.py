@@ -125,7 +125,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 viewpoint_cam = viewpoint_stack_on_the_fly.pop()
                 if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
                     on_the_fly_obj.add_gaussians(gaussians, viewpoint_cam)
-                print("num: ", gaussians.get_xyz.shape[0])
 
     for iteration in progress_bar:
         gaussians.update_learning_rate(iteration)

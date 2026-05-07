@@ -54,7 +54,7 @@ class DepthEstimator:
 
         os.makedirs("models", exist_ok=True)
         if not os.path.exists(ckpt):
-            print(f"Downloading {ckpt} ...")
+            print(f"[DepthEstimator] Downloading {ckpt} ...")
             urllib.request.urlretrieve(url, ckpt)
 
         self.model = DepthAnythingV2(**model_configs[encoder])
@@ -87,7 +87,7 @@ class DepthEstimator:
     def estimate_depth(self, img):
         # Keep the whole inference path on-device to avoid GPU->CPU->GPU copies.
         if img.dim() != 3:
-            raise ValueError(f"Expected CHW image tensor, got shape {tuple(img.shape)}")
+            raise ValueError(f"[DepthEstimator] Expected CHW image tensor, got shape {tuple(img.shape)}")
 
         h, w = img.shape[-2:]
         new_h, new_w = self._compute_dav2_size(h, w)
