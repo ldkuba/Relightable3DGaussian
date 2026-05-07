@@ -202,7 +202,6 @@ class DepthEstimator:
 
         ratio = s_sfm / s_rel
         D = ratio * D_rel + t_sfm - t_rel * ratio
-        D = torch.clamp(D, 1e-6, 1e6)
         D = 1.0 / D
 
         return D
@@ -276,6 +275,7 @@ class DepthEstimator:
                 uv,
                 xyzs_cam_space[:, 2],
             )
+        depth_map = torch.clamp(depth_map, 1e-6, 1e6)
 
         return depth_map
 
