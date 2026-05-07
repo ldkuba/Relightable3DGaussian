@@ -6,7 +6,6 @@ import numpy as np
 import torch
 
 from simple_knn._C import distCUDA2
-from tqdm import tqdm
 
 from DepthEstimator import DepthEstimator
 from MaskSampler import MaskSampler
@@ -27,11 +26,6 @@ class GaussianBatch(NamedTuple):
     normals: torch.Tensor
     shs_dc: torch.Tensor
     shs_rest: torch.Tensor
-    max_radii2D: torch.Tensor
-    weights: torch.Tensor
-    xyz_gradient_accum: torch.Tensor
-    normal_gradient_accum: torch.Tensor
-    denom: torch.Tensor
 
 class OnTheFly:
 
@@ -182,20 +176,9 @@ class OnTheFly:
         shs_dc = shs[:, :, 0:1].transpose(1, 2)
         shs_rest = shs[:, :, 1:].transpose(1, 2)
 
-        # ++ max_radii2D ++
-        max_radii2D = torch.zeros((world_points.shape[0]), device="cuda")
-
-        # ++ weights ++
-        weights = torch.zeros(world_points.shape[0], 1, device="cuda")
-
-        xyz_gradient_accum = torch.zeros((world_points.shape[0], 1), device="cuda")
-        normal_gradient_accum = torch.zeros((world_points.shape[0], 1), device="cuda")
-        denom = torch.zeros((world_points.shape[0], 1), device="cuda")
-
         gaussian_batch = GaussianBatch(
             means=world_points, scales=scales, rotations=rots, normals=normals, shs_dc=shs_dc, shs_rest=shs_rest,
-            opacities=opacities, max_radii2D=max_radii2D, weights=weights, xyz_gradient_accum=xyz_gradient_accum,
-            normal_gradient_accum=normal_gradient_accum, denom=denom)
+            opacities=opacities)
 
         self.gaussian_batches[cam.image_name] = gaussian_batch
 
