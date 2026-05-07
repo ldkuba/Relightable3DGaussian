@@ -88,6 +88,8 @@ class OnTheFly:
         self.depth_estimator = DepthEstimator(otfp, scene_info, self.p3ids, self.xyzs, self.key_points_torch)
         self.mask_sampler = MaskSampler(otfp, scene_info, width, height, self.key_points_torch)
 
+        print(self.to_string())
+
     def _move_key_points_to_device(self, key_points):
         key_points_torch = {}
         for image_name, value in key_points.items():
@@ -363,3 +365,15 @@ class OnTheFly:
             wandb_run.log(metrics, step=global_step)
 
         return metrics
+
+    def to_string(self):
+        return (
+            f"OnTheFly[device={self.DEVICE}, width={self.width}, height={self.height}, "
+            f"max_sh_degree={self.max_sh_degree}, bg={self.bg}, knn_p={self.knn_p}, knn_n={self.knn_n}, "
+            f"knn_stride={self.knn_stride}, knn_epsilon={self.knn_epsilon}, "
+            f"error_threshold={self.error_threshold}, feature_threshold={self.feature_threshold}, "
+            f"base_prob={self.base_prob}, normalize_prob={self.normalize_prob}, "
+            f"apply_penalty_map={self.apply_penalty_map}, neighbourhood_angle={self.neighbourhood_angle}, "
+            f"dav2_target_width={self.dav2_target_width}, feature_sigma={self.feature_sigma}, "
+            f"feature_min_coverage={self.feature_min_coverage}, feature_gate_mode={self.feature_gate_mode}]"
+        )

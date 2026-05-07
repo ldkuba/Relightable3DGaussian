@@ -37,6 +37,7 @@ class MaskSampler:
         self.disc_kernel = self.disc_kernel.cuda() / self.disc_kernel.sum()
 
         self.feature_kernel = self._make_gaussian_kernel().to(self.DEVICE)
+        print(self.to_string())
 
     """
     from on the fly
@@ -161,3 +162,12 @@ class MaskSampler:
             raise ValueError(f"[MaskSampler] Unknown feature_gate_mode: {self.feature_gate_mode}")
 
         return gated, coverage
+
+    def to_string(self):
+        return (
+            f"MaskSampler[device={self.DEVICE}, width={self.width}, height={self.height}, "
+            f"base_prob={self.base_prob}, normalize_prob={self.normalize_prob}, "
+            f"apply_penalty_map={self.apply_penalty_map}, feature_sigma={self.feature_sigma}, "
+            f"truncate={self.truncate}, feature_min_coverage={self.feature_min_coverage}, "
+            f"feature_gate_mode={self.feature_gate_mode}]"
+        )
