@@ -39,12 +39,13 @@ class MaskSampler:
         self.feature_kernel = self._make_gaussian_kernel().to(self.DEVICE)
         print(self.to_string())
 
-    """
-    from on the fly
-    TODO cite
-    """
     @torch.no_grad()
     def get_lapla_norm(self, img, kernel):
+        """
+        Taken from https://github.com/graphdeco-inria/on-the-fly-nvs.git
+        by Andreas Meuleman, Ishaan Shah, Alexandre Lanvin, Bernhard Kerbl, George Drettakis
+        Commit-hash: 4ae0ad1d0b9d67f199dc68161227cf279c79a473
+        """
         laplacian_kernel = (
             torch.tensor(
                 [[0, 1, 0], [1, -4, 1], [0, 1, 0]], device="cuda", dtype=torch.float32
@@ -113,8 +114,14 @@ class MaskSampler:
 
     @torch.no_grad()
     def create_density_map(self, img):
-        """Creates a probability map, reference add_new_gaussians in scene_model from on the fly
-        - kernel is eq. 1 in paper"""
+        """
+        Adapted from https://github.com/graphdeco-inria/on-the-fly-nvs.git
+        by Andreas Meuleman, Ishaan Shah, Alexandre Lanvin, Bernhard Kerbl, George Drettakis
+        Commit-hash: 4ae0ad1d0b9d67f199dc68161227cf279c79a473
+
+        Creates a probability map, reference add_new_gaussians in scene_model from on the fly
+        - kernel is eq. 1 in paper
+        """
         img = F.avg_pool2d(img, 2)
         img = F.interpolate(
             img[None], (self.height, self.width), mode="bilinear", align_corners=True
