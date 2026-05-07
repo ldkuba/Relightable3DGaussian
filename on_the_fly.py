@@ -77,6 +77,7 @@ class OnTheFly:
 
 
         self.scene_info = scene_info
+        self.key_points_torch = self._move_key_points_to_device(scene_info.key_points)
 
         self.camera_processed = set()
 
@@ -89,8 +90,20 @@ class OnTheFly:
 
         self.neighbourhood = dict()
 
-        self.depth_estimator = DepthEstimator(otfp, scene_info, self.p3ids, self.xyzs)
-        self.mask_sampler = MaskSampler(otfp, scene_info, width, height)
+        self.depth_estimator = DepthEstimator(otfp, scene_info, self.p3ids, self.xyzs, self.key_points_torch)
+        self.mask_sampler = MaskSampler(otfp, scene_info, width, height, self.key_points_torch)
+
+    def _move_key_points_to_device(self, key_points):
+        key_points_torch = {}
+        for image_name, value in key_points.items():
+            if value is None:
+                continue
+            key_ids, key_uv = value
+            key_points_torch[image_name] = (
+                torch.as_tensor(key_ids, device=self.DEVICE, dtype=torch.long),
+                torch.as_tensor(key_uv, device=self.DEVICE, dtype=torch.float32),
+            )
+        return key_points_torch
 
     def generate_mask(self, img):
         return img != self.bg
@@ -202,7 +215,8 @@ class OnTheFly:
         image_D.save(os.path.expanduser(f"~/gaussian-splatting/pcd/depth_maps/{name}_depth_map.png"))
 
     def add_gaussians(self, gaussians, viewpoint_cam):
-        if len(self.scene_info.key_points.get(f'{viewpoint_cam.image_name}.png')[0]) < self.feature_threshold:
+        key_points = self.key_points_torch.get(f"{viewpoint_cam.image_name}.png")
+        if key_points is None or key_points[0].numel() < self.feature_threshold:
             return
 
         # generate masks

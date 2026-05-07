@@ -32,7 +32,7 @@ from depth_anything_v2.dpt import DepthAnythingV2
 
 class DepthEstimator:
 
-    def __init__(self, otfp, scene_info, p3ids, xyzs):
+    def __init__(self, otfp, scene_info, p3ids, xyzs, key_points):
         self.DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
         self.knn_p = otfp.knn_p
@@ -64,6 +64,9 @@ class DepthEstimator:
         self.scene_info = scene_info
         self.p3ids = p3ids
         self.xyzs = xyzs
+        self.key_points = key_points
+        self.p3ids_torch = torch.as_tensor(self.p3ids, device=self.DEVICE, dtype=torch.long)
+        self.xyzs_torch = torch.as_tensor(self.xyzs, device=self.DEVICE, dtype=torch.float32)
 
         self.adjust_by_pytorch3d_knn_points = otfp.adjust_by_pytorch3d_knn_points
         self.adjust_by_median = otfp.adjust_by_median
@@ -99,14 +102,36 @@ class DepthEstimator:
 
     @torch.no_grad()
     def get_key_points(self, viewpoint_cam):
-        xyzs = self.xyzs
-        key_points = self.scene_info.key_points.get(f"{viewpoint_cam.image_name}.png")
+        key_points = self.key_points.get(f"{viewpoint_cam.image_name}.png")
+        if key_points is None or key_points[0].numel() == 0:
+            empty_uv = torch.empty((0, 2), device=self.DEVICE, dtype=torch.float32)
+            empty_xyz = torch.empty((0, 3), device=self.DEVICE, dtype=torch.float32)
+            return empty_uv, empty_xyz
 
-        id3d = self.p3ids
-        id2d = key_points[0]
+        id2d = key_points[0].reshape(-1)
+        uv = key_points[1]
+        id3d = self.p3ids_torch.reshape(-1)
 
-        _, m3d, m2d = np.intersect1d(id3d, id2d, return_indices=True)
-        return key_points[1][m2d, :], xyzs[m3d, :]
+        id3d_sorted, sort_idx = torch.sort(id3d)
+        pos = torch.searchsorted(id3d_sorted, id2d)
+        in_bounds = pos < id3d_sorted.numel()
+        if not torch.any(in_bounds):
+            empty_uv = torch.empty((0, 2), device=self.DEVICE, dtype=torch.float32)
+            empty_xyz = torch.empty((0, 3), device=self.DEVICE, dtype=torch.float32)
+            return empty_uv, empty_xyz
+
+        id2d_in = id2d[in_bounds]
+        pos_in = pos[in_bounds]
+        match = id3d_sorted[pos_in] == id2d_in
+        if not torch.any(match):
+            empty_uv = torch.empty((0, 2), device=self.DEVICE, dtype=torch.float32)
+            empty_xyz = torch.empty((0, 3), device=self.DEVICE, dtype=torch.float32)
+            return empty_uv, empty_xyz
+
+        matched_uv = uv[in_bounds][match]
+        matched_xyz_idx = sort_idx[pos_in[match]]
+        matched_xyz = self.xyzs_torch[matched_xyz_idx]
+        return matched_uv, matched_xyz
 
     def t(self, D):
         if not torch.is_tensor(D):
@@ -225,21 +250,22 @@ class DepthEstimator:
             return depth_map
 
         uv, xyzs = self.get_key_points(viewpoint_cam)
-        if len(uv) == 0:
+        if uv.shape[0] == 0:
             return depth_map
 
-        uv = np.round(uv).astype(dtype=np.int32)
-        xyzs_cam_space = np.concatenate((xyzs, np.ones((xyzs.shape[0], 1))), axis=1) @ viewpoint_cam.extrinsics.T.detach().cpu().numpy()
+        uv = torch.round(uv).to(dtype=torch.int64)
+        xyzs_h = torch.cat((xyzs, torch.ones((xyzs.shape[0], 1), device=xyzs.device, dtype=xyzs.dtype)), dim=1)
+        xyzs_cam_space = xyzs_h @ viewpoint_cam.extrinsics.T.to(device=xyzs.device, dtype=xyzs.dtype)
 
 
         if self.adjust_by_median:
-            depth_map = self.adjust_depth_median(depth_map, uv, xyzs_cam_space[:,2])
+            depth_map = self.adjust_depth_median(depth_map, uv, xyzs_cam_space[:, 2])
 
         if self.adjust_by_scipy_cKDTree:
             depth_map_np = self.adjust_depth_knn(
                 depth_map.detach().cpu().numpy(),
-                uv,
-                xyzs_cam_space[:, 2],
+                uv.detach().cpu().numpy(),
+                xyzs_cam_space[:, 2].detach().cpu().numpy(),
             )
             depth_map = torch.from_numpy(depth_map_np).to(device=depth_map.device)
 

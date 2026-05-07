@@ -5,12 +5,13 @@ import torch.nn.functional as F
 
 class MaskSampler:
 
-    def __init__(self, otfp, scene_info, width, height):
+    def __init__(self, otfp, scene_info, width, height, key_points_torch):
 
         # set device
         self.DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
         self.scene_info = scene_info
+        self.key_points_torch = key_points_torch
 
         self.width = width
         self.height = height
@@ -64,25 +65,26 @@ class MaskSampler:
         Returns a blurred feature support map in [0, 1], shape [H, W].
         High values mean: this pixel is near matched keypoints / SfM support.
         """
-        key_points = self.scene_info.key_points.get(f"{viewpoint_cam.image_name}.png")
-        if key_points is None or len(key_points[0]) == 0:
+        key_points = self.key_points_torch.get(f"{viewpoint_cam.image_name}.png")
+        if key_points is None or key_points[0].numel() == 0:
             return torch.zeros((self.height, self.width), device=self.DEVICE)
 
-        uv = key_points[1]  # shape [N, 2], assumed (u, v)
-        uv = np.round(uv).astype(np.int32)
+        uv = torch.round(key_points[1]).long()  # shape [N, 2], assumed (u, v)
 
         valid = (
-            (uv[:, 0] >= 0) & (uv[:, 0] < self.width) &
-            (uv[:, 1] >= 0) & (uv[:, 1] < self.height)
+            (uv[:, 0] >= 0)
+            & (uv[:, 0] < self.width)
+            & (uv[:, 1] >= 0)
+            & (uv[:, 1] < self.height)
         )
         uv = uv[valid]
 
-        if len(uv) == 0:
+        if uv.numel() == 0:
             return torch.zeros((self.height, self.width), device=self.DEVICE)
 
         feat_map = torch.zeros((1, 1, self.height, self.width), device=self.DEVICE)
-        u = torch.from_numpy(uv[:, 0]).long().to(self.DEVICE)
-        v = torch.from_numpy(uv[:, 1]).long().to(self.DEVICE)
+        u = uv[:, 0]
+        v = uv[:, 1]
 
         feat_map[0, 0, v, u] = 1.0
 
