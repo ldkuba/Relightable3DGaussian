@@ -28,9 +28,45 @@ import visualization.visualize_covariance as vis_cov
 
 import time
 
-def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, wandb_run=None):
+def process_gaussian_images(gaussian_renders):
+    rgb_gaussians = gaussian_renders['render'].clone()
+    depth_gaussians = gaussian_renders['depth'].clone()
+    opacity_gaussian = gaussian_renders['opacity']
+    depth_variance = gaussian_renders['depth_var']
+
+    # Filter by opacity
+    opacity_threshold = 0.95
+    opacity_max = opacity_gaussian.max().item()
+    opacity_mask = opacity_gaussian.squeeze(0) > (opacity_max * opacity_threshold)
+    rgb_gaussians[:, ~opacity_mask] = 0.0
+    depth_gaussians[:, ~opacity_mask] = 0.0
+
+    # Filter by depth variance
+    depth_variance_threshold = 0.002
+    depth_variance_max = depth_variance.max().item()
+    depth_variance_mask = depth_variance.squeeze(0) < (depth_variance_max * depth_variance_threshold)
+    rgb_gaussians[:, ~depth_variance_mask] = 0.0
+    depth_gaussians[:, ~depth_variance_mask] = 0.0
+
+    combined_mask = opacity_mask | depth_variance_mask
+
+    return rgb_gaussians, depth_gaussians, combined_mask
+
+def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
+
+    ## Start wandb run
+    wandb_run = wandb.init(
+        entity="ldkuba-tu-wien",
+        project="GS-Reconstruction-Pipeline",
+        name="Separate Networks",
+        config={
+            "model_type": "R3DG",
+            "iterations": opt.iterations,
+            "smoothing_strength": args.local_smoothing_strength,
+        },
+    )
 
     """
     Setup Gaussians
@@ -161,12 +197,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 sdf, variance, sdf_spacing, sdf_corner = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
                 sdf.retain_grad()
 
-                # vis = vis_cov.VisualizationWriter(torch.tensor([128, 128, 128]), sdf_spacing, sdf_corner)
-                # vis.add_variance(sdf.flatten(), "mean", use_colors=True)
-                # vis.add_variance(variance.flatten(), "variance", use_colors=True)
-                # vis_file = f"debug_artifacts/pipeline_r3dg/sdpsr_scalar_mean_{iteration}.pt"
-                # vis.save(vis_file)
-
                 # Volumetric SDF rendering
                 depth_sdf, normal_sdf, ray_mask = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
                 depth_sdf = depth_sdf[ray_mask].unsqueeze(-1)
@@ -186,48 +216,52 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 loss_depth = F.mse_loss(depth_sdf, selected_depth_gaussian, reduction='sum')
                 loss_normal = F.l1_loss(normal_sdf, selected_normal_gaussian, reduction='sum') + F.l1_loss(torch.ones_like(normal_dot), normal_dot, reduction='sum')
 
-                # from PIL import Image
-                # depth_sdf = depth_sdf.cpu().detach().clip(min=0.0, max=10.0)
-                # # depth = depth.max() - depth
-                # depth_sdf_image = depth_sdf.numpy()
-                # depth_sdf_image = (depth_sdf_image - depth_sdf_image.min()) / (depth_sdf_image.max() - depth_sdf_image.min()) * 255.0
-                # depth_sdf_image = Image.fromarray(depth_sdf_image.astype(np.uint8))
-                # depth_sdf_image.save("./debug_artifacts/pipeline_r3dg/sdpsr_depth_sdf_iter_{}.png".format(iteration))
-                # # depth_sdf_image.show()
-
-                # depth_gaussian = depth_gaussian.reshape(200, 200).cpu().detach().clip(min=0.0, max=10.0)
-                # depth_gaussian_image = depth_gaussian.numpy()
-                # depth_gaussian_image = (depth_gaussian_image - depth_gaussian_image.min()) / (depth_gaussian_image.max() - depth_gaussian_image.min()) * 255.0
-                # depth_gaussian_image = Image.fromarray(depth_gaussian_image.astype(np.uint8))
-                # depth_gaussian_image.save("./debug_artifacts/pipeline_r3dg/sdpsr_depth_gaussian_iter_{}.png".format(iteration))
-                # # depth_gaussian_image.show()
-
-                # normal_sdf = normal_sdf.cpu().detach()
-                # normal_sdf_image = (normal_sdf.numpy() + 1.0) / 2.0 * 255.0
-                # normal_sdf_image = Image.fromarray(normal_sdf_image.astype(np.uint8))
-                # normal_sdf_image.save("./debug_artifacts/pipeline_r3dg/sdpsr_normal_sdf_iter_{}.png".format(iteration))
-                # # normal_sdf_image.show()
-
-                # normal_gaussian = normal_gaussian.permute(1, 2, 0).cpu().detach()
-                # normal_gaussian_image = (normal_gaussian.numpy() + 1.0) / 2.0 * 255.0
-                # normal_gaussian_image = Image.fromarray(normal_gaussian_image.astype(np.uint8))
-                # normal_gaussian_image.save("./debug_artifacts/pipeline_r3dg/sdpsr_normal_gaussian_iter_{}.png".format(iteration))
-                # normal_gaussian_image.show()
-
                 loss += loss_depth * opt.lambda_vol_depth_render
                 loss += loss_normal * opt.lambda_vol_normal_render
+
+        # Local flattening of mono-color regions
+        if args.local_smoothing_strength > 0:
+
+            patch_size = 3
+            num_kernel = patch_size * patch_size
+            padding = int(np.floor(patch_size / 2))
+
+            # Calculate strength of smoothing based on local variance of colors
+            rgb_gaussians, depth_gaussians, mask_gaussians = process_gaussian_images(render_pkg)
+
+            # Measure local color variance using 3x3 patches
+            patches_r = F.unfold(rgb_gaussians[0:1].unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, 1, rgb_gaussians.shape[1], rgb_gaussians.shape[2])
+            patches_g = F.unfold(rgb_gaussians[1:2].unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, 1, rgb_gaussians.shape[1], rgb_gaussians.shape[2])
+            patches_b = F.unfold(rgb_gaussians[2:3].unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, 1, rgb_gaussians.shape[1], rgb_gaussians.shape[2])            
+            patches = torch.cat([patches_r, patches_g, patches_b], dim=1)
+            patches_distance = torch.norm(patches - rgb_gaussians.unsqueeze(0), dim=1)
+            color_variance = patches_distance.max(dim=0)
+            color_variance_mask = color_variance.values < args.color_variance_threshold
+
+            # Mask out image borders
+            border_mask = torch.ones_like(mask_gaussians)
+            border_mask[:padding, :] = False
+            border_mask[-padding:, :] = False
+            border_mask[:, :padding] = False
+            border_mask[:, -padding:] = False
+            combined_mask = color_variance_mask & mask_gaussians & border_mask
+
+            # Compute smoothed local patches
+            border_avg_filter = torch.ones((1, 1, patch_size, patch_size), dtype=torch.float32, device=depth_gaussians.device) / (num_kernel-1)
+            border_avg_filter[:, :, padding, padding] = 0
+            smooth_centers = F.conv2d(depth_gaussians.unsqueeze(0), weight=border_avg_filter, padding=padding).squeeze(0)
+
+            # Compute color variance
+            local_smoothing_loss = F.mse_loss(depth_gaussians[:, combined_mask], smooth_centers[:, combined_mask])
+            loss += local_smoothing_loss * args.local_smoothing_strength
 
         loss.backward()
 
         if wandb_run is not None:
             wandb_run.log({
                 "loss_total": loss.item(),
-                "loss_depth_sdf": loss_depth.item() * opt.lambda_vol_depth_render if args.diff_spsr and iteration > diff_spsr_start_iteration else 0,
-                "loss_normal_sdf": loss_normal.item() * opt.lambda_vol_normal_render if args.diff_spsr and iteration > diff_spsr_start_iteration else 0,
-                "psnr": tb_dict["psnr"],
-                "sdf_grad": wandb.Histogram(sdf.grad.cpu().numpy()) if args.diff_spsr and iteration > diff_spsr_start_iteration and iteration % 100 == 0 and sdf.grad is not None else None,
-                "sdf_depth_grad": wandb.Histogram(depth_sdf.grad.cpu().numpy()) if args.diff_spsr and iteration > diff_spsr_start_iteration and iteration % 100 == 0 and depth_sdf.grad is not None else None,
-                "sdf_normal_grad": wandb.Histogram(normal_sdf.grad.cpu().numpy()) if args.diff_spsr and iteration > diff_spsr_start_iteration and iteration % 100 == 0 and normal_sdf.grad is not None else None,
+                "loss_smoothing": local_smoothing_loss.item() if args.local_smoothing_strength > 0 else 0.0,
+                "psnr": tb_dict["psnr"]
             }, step=iteration)
 
         with torch.no_grad():
@@ -300,6 +334,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
     if dataset.eval:
         eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs)
+
+    wandb_run.finish()
 
     return gaussians
 
@@ -477,7 +513,7 @@ def eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kw
     print("\n[ITER {}] Evaluating {}: PSNR {} SSIM {} LPIPS {}".format(args.iterations, "test", psnr_test, ssim_test,
                                                                        lpips_test))
 
-def main(args, wandb_run=None):
+def main(args):
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)
@@ -495,7 +531,10 @@ def main(args, wandb_run=None):
 
     # Diff PSR args
     parser.add_argument("--diff-spsr", action='store_true', default=False, help='use diff-spsr for reconstruction')
-    # ...other args...
+    
+    # Local smoothing args
+    parser.add_argument("--local-smoothing-strength", type=float, default=0, help='local smoothing for flat, mono-color regions')
+    parser.add_argument("--color-variance-threshold", type=float, default=0.05, help='threshold for color variance to apply local smoothing')
 
     args = parser.parse_args(args)
     print(f"Current model path: {args.model_path}")
@@ -511,7 +550,7 @@ def main(args, wandb_run=None):
 
     args.is_pbr = args.type in ['neilf']
 
-    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args), wandb_run=wandb_run)
+    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args))
     print("\nTraining complete.")
     return gaussians
 
