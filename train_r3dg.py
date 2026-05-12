@@ -57,6 +57,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     tb_writer = prepare_output_and_logger(dataset)
 
     ## Start wandb run
+    # wandb_run = None
     wandb_run = wandb.init(
         entity="ldkuba-tu-wien",
         project="GS-Reconstruction-Pipeline",
@@ -222,7 +223,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         # Local flattening of mono-color regions
         if args.local_smoothing_strength > 0:
 
-            patch_size = 3
+            patch_size = args.local_smoothing_patch_size
             num_kernel = patch_size * patch_size
             padding = int(np.floor(patch_size / 2))
 
@@ -247,12 +248,39 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
             combined_mask = color_variance_mask & mask_gaussians & border_mask
 
             # Compute smoothed local patches
-            border_avg_filter = torch.ones((1, 1, patch_size, patch_size), dtype=torch.float32, device=depth_gaussians.device) / (num_kernel-1)
-            border_avg_filter[:, :, padding, padding] = 0
-            smooth_centers = F.conv2d(depth_gaussians.unsqueeze(0), weight=border_avg_filter, padding=padding).squeeze(0)
+            # Compute gradients in x and y direction
+            depth_grad_x, depth_grad_y = torch.gradient(depth_gaussians, dim=(-2, -1), edge_order=1)
+            depth_grad_x_patches = F.unfold(depth_grad_x.unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, depth_gaussians.shape[1], depth_gaussians.shape[2])
+            depth_grad_y_patches = F.unfold(depth_grad_y.unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, depth_gaussians.shape[1], depth_gaussians.shape[2])
+
+            # Filter fepth patches, to only those that will contribute to the loss
+            depth_grad_x_patches = depth_grad_x_patches[:, combined_mask]
+            depth_grad_y_patches = depth_grad_y_patches[:, combined_mask]
+
+            # Get mean gradient in x and y direction for each patch
+            mean_depth_grad_x = depth_grad_x_patches.mean(dim=0)
+            mean_depth_grad_y = depth_grad_y_patches.mean(dim=0)
+
+            # Get depth patches and filter them
+            depth_patches = F.unfold(depth_gaussians.unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, depth_gaussians.shape[1], depth_gaussians.shape[2])
+            depth_patches = depth_patches[:, combined_mask]
+
+            # Tilt patches, so the normal is parallel with the view direction
+            tilt_offset = mean_depth_grad_x * (torch.arange(num_kernel, device=depth_gaussians.device) % patch_size - padding).unsqueeze(1) + mean_depth_grad_y * (torch.arange(num_kernel, device=depth_gaussians.device) // patch_size - padding).unsqueeze(1)
+            depth_patches_tilted = depth_patches - tilt_offset
+
+            # Flatten patch
+            depth_patches_tilted_smooth = depth_patches_tilted.mean(dim=0, keepdim=True).repeat(num_kernel, 1)
+
+            # Un-tilt patches
+            depth_patches_smooth = depth_patches_tilted_smooth + tilt_offset
+
+            debug_depth_delta = (depth_patches_smooth - depth_patches).abs().sum(dim=0)
+            debug_smoothing_loss = torch.zeros_like(depth_gaussians)
+            debug_smoothing_loss[:, combined_mask] = debug_depth_delta
 
             # Compute color variance
-            local_smoothing_loss = F.mse_loss(depth_gaussians[:, combined_mask], smooth_centers[:, combined_mask])
+            local_smoothing_loss = F.mse_loss(depth_patches, depth_patches_smooth)
             loss += local_smoothing_loss * args.local_smoothing_strength
 
         loss.backward()
@@ -267,7 +295,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         with torch.no_grad():
             if pipe.save_training_vis:
                 save_training_vis(args, viewpoint_cam, gaussians, background, render_fn,
-                                  pipe, opt, first_iter, iteration, pbr_kwargs)
+                                  pipe, opt, first_iter, iteration, debug_smoothing_loss, pbr_kwargs)
             # Progress bar
             pbar_dict = {"num": gaussians.get_xyz.shape[0]}
             if args.is_pbr:
@@ -407,7 +435,7 @@ def training_report(args, tb_writer, iteration, tb_dict, scene: Scene, renderFun
         torch.cuda.empty_cache()
 
 
-def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pipe, opt, first_iter, iteration, pbr_kwargs):
+def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pipe, opt, first_iter, iteration, smoothing_loss, pbr_kwargs):
     os.makedirs(os.path.join(args.model_path, "visualize"), exist_ok=True)
     with torch.no_grad():
         if iteration % pipe.save_training_vis_iteration == 0 or iteration == first_iter + 1:
@@ -443,6 +471,9 @@ def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pip
                     rgb_to_srgb(env_0),
                     rgb_to_srgb(env_1),
                 ])
+
+            if smoothing_loss is not None:
+                visualization_list.append((smoothing_loss / smoothing_loss.max()).repeat(3, 1, 1))
 
             grid = torch.stack(visualization_list, dim=0)
             grid = make_grid(grid, nrow=4)
@@ -535,6 +566,7 @@ def main(args):
     # Local smoothing args
     parser.add_argument("--local-smoothing-strength", type=float, default=0, help='local smoothing for flat, mono-color regions')
     parser.add_argument("--color-variance-threshold", type=float, default=0.05, help='threshold for color variance to apply local smoothing')
+    parser.add_argument("--local-smoothing-patch-size", type=int, default=3, help='patch size for local smoothing')
 
     args = parser.parse_args(args)
     print(f"Current model path: {args.model_path}")
