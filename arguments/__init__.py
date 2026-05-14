@@ -90,6 +90,16 @@ class OnTheFlyParams(ParamGroup):
         self.feature_min_coverage = 0.05
         self.feature_gate_mode = "multiply" # 'multiply' or 'hard'
         self.apply_penalty_map = False
+        self.eval_enabled = False
+        self.eval_profile_path = ""
+        self.eval_output_dir = ""
+        self.eval_run_id = ""
+        self.eval_dataset_id = ""
+        self.eval_scene = ""
+        self.eval_split = "train"
+        self.eval_checkpoint = ""
+        self.eval_git_commit = ""
+        self.eval_save_pic_x_iter = -1
         super().__init__(parser, "Pipeline Parameters")
 
 

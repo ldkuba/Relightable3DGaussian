@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import torch.nn.functional as F
 import torchvision
@@ -73,6 +74,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     tmp = scene.getTrainCameras()[0]
     on_the_fly_obj = OnTheFly(width=tmp.image_width, height=tmp.image_height, max_sh_degree=dataset.sh_degree,
                               otfp=on_the_fly_args, dataset=dataset, args=args, scene_info=scene.scene_info, render_fn=render_fn, pipe=pipe, pbr_kwargs=pbr_kwargs, opt=opt)
+    track_runtime_timing = on_the_fly_obj.local_time_enabled or (wandb_run is not None and on_the_fly_obj.wandb_time_enabled)
 
     on_the_fly_obj.init_neighbourhood(scene.getTrainCameras())
 
@@ -124,9 +126,20 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
             for iter in initial_progb:
                 viewpoint_cam = viewpoint_stack_on_the_fly.pop()
                 if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
+                    spawn_start_time = time.perf_counter() if track_runtime_timing else None
                     on_the_fly_obj.add_gaussians(gaussians, viewpoint_cam)
+                    if track_runtime_timing:
+                        spawn_elapsed_ms = (time.perf_counter() - spawn_start_time) * 1000.0
+                        on_the_fly_obj.log_initial_spawn_timing(
+                            spawn_index=iter + 1,
+                            camera_name=viewpoint_cam.image_name,
+                            duration_ms=spawn_elapsed_ms,
+                            num_gaussians=gaussians.get_xyz.shape[0],
+                            wandb_run=wandb_run,
+                        )
 
     for iteration in progress_bar:
+        iter_start_time = time.perf_counter() if track_runtime_timing else None
         gaussians.update_learning_rate(iteration)
 
         if windows is not None:
@@ -168,12 +181,13 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 #                "ssim": tb_dict['ssim']
 #            }, step=iteration)
 
-        if wandb_run is not None:
-            print("asdf")
+        if on_the_fly_obj.should_log_eval(iteration, wandb_run=wandb_run):
+            split_name = on_the_fly_obj.eval_split if on_the_fly_obj.eval_split in ["train", "test"] else "train"
+            eval_cameras = scene.getTestCameras() if split_name == "test" else scene.getTrainCameras()
             on_the_fly_obj.log_rendered_view_metrics_summary(
                 global_step=iteration,
-                split_name="test",
-                cameras=scene.getTrainCameras(),
+                split_name=split_name,
+                cameras=eval_cameras,
                 gaussians=scene.gaussians,
                 render_fn=render_fn,
                 pipe=pipe,
@@ -265,6 +279,15 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                     component.step()
                 except:
                     pass
+
+            if track_runtime_timing:
+                iter_elapsed_ms = (time.perf_counter() - iter_start_time) * 1000.0
+                on_the_fly_obj.log_iteration_timing(
+                    iteration=iteration,
+                    duration_ms=iter_elapsed_ms,
+                    num_gaussians=gaussians.get_xyz.shape[0],
+                    wandb_run=wandb_run,
+                )
             
             # save checkpoints
             if iteration % args.save_interval == 0 or iteration == args.iterations:

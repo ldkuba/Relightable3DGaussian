@@ -1,9 +1,15 @@
 import os
 import math
+import json
+import csv
+import time
+import subprocess
 from typing import NamedTuple
+from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from simple_knn._C import distCUDA2
 
@@ -15,6 +21,7 @@ from utils.general_utils import inverse_sigmoid
 from utils.image_utils import psnr
 from utils.loss_utils import ssim
 from utils.sh_utils import RGB2SH
+from lpipsPyTorch import lpips
 
 from PIL import Image
 
@@ -51,6 +58,16 @@ class OnTheFly:
         self.feature_min_coverage = otfp.feature_min_coverage
         self.feature_gate_mode = otfp.feature_gate_mode
         # "multiply" or "hard"
+        self.eval_split = otfp.eval_split
+        self.eval_enabled = bool(otfp.eval_enabled)
+        self.eval_profile_path = otfp.eval_profile_path
+        self.eval_output_dir = otfp.eval_output_dir
+        self.eval_run_id = otfp.eval_run_id
+        self.eval_dataset_id = otfp.eval_dataset_id
+        self.eval_scene = otfp.eval_scene
+        self.eval_checkpoint = otfp.eval_checkpoint
+        self.eval_git_commit = otfp.eval_git_commit
+        self.eval_save_pic_x_iter_override = otfp.eval_save_pic_x_iter
 
         self.dataset = dataset
         self.args = args
@@ -88,7 +105,169 @@ class OnTheFly:
         self.depth_estimator = DepthEstimator(otfp, scene_info, self.p3ids, self.xyzs, self.key_points_torch)
         self.mask_sampler = MaskSampler(otfp, scene_info, width, height, self.key_points_torch)
 
+        self.eval_profile = self._load_eval_profile()
+        local_profile = self.eval_profile.get("local", {})
+        self.eval_git_commit_value = self._default_git_commit()
+        self.eval_raw_csv_path = None
+        self.eval_save_pic_x_iter = int(local_profile.get("save_pic_x_iter", -1))
+
+        if self.eval_save_pic_x_iter_override and self.eval_save_pic_x_iter_override > 0:
+            self.eval_save_pic_x_iter = self.eval_save_pic_x_iter_override
+
+        self.local_eval_enabled = self.eval_enabled and bool(local_profile.get("enabled", False))
+        self.local_time_enabled = self.local_eval_enabled and bool(local_profile.get("time", False))
+        wandb_profile = self.eval_profile.get("wandb", {})
+        self.wandb_time_enabled = bool(wandb_profile.get("enabled", False)) and bool(wandb_profile.get("time", False))
+        self.eval_run_dir = None
+        self.eval_render_dir = None
+
+        if self.local_eval_enabled:
+            self._prepare_eval_output()
+            self._write_eval_metadata()
+
         print(self.to_string())
+
+    def _load_eval_profile(self):
+        profile = {
+            "wandb": {
+                "enabled": False,
+                "psnr_avg": False,
+                "ssim_avg": False,
+                "lpips_avg": False,
+                "l1_avg": False,
+                "time": False,
+            },
+            "local": {
+                "enabled": False,
+                "psnr_uniq": False,
+                "ssim_uniq": False,
+                "lpips_uniq": False,
+                "l1_uniq": False,
+                "time": False,
+                "save_pic_x_iter": -1,
+            },
+        }
+        if self.eval_profile_path and os.path.exists(self.eval_profile_path):
+            with open(self.eval_profile_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                if isinstance(loaded.get("wandb"), dict) or isinstance(loaded.get("local"), dict):
+                    if isinstance(loaded.get("wandb"), dict):
+                        profile["wandb"].update(loaded["wandb"])
+                    if isinstance(loaded.get("local"), dict):
+                        profile["local"].update(loaded["local"])
+                else:
+                    # Backward compatibility with flat profiles.
+                    profile["wandb"]["enabled"] = bool(loaded.get("wandb", False))
+                    for metric in ["psnr", "ssim", "lpips", "l1"]:
+                        profile["wandb"][f"{metric}_avg"] = bool(loaded.get(f"{metric}_avg", False))
+                        profile["local"][f"{metric}_uniq"] = bool(loaded.get(f"{metric}_uniq", False))
+                    profile["wandb"]["time"] = bool(loaded.get("time", False))
+                    profile["local"]["time"] = bool(loaded.get("time", False))
+                    profile["local"]["save_pic_x_iter"] = int(loaded.get("save_pic_x_iter", -1))
+
+        if self.eval_enabled:
+            profile["local"]["enabled"] = bool(profile["local"].get("enabled", False))
+        return profile
+
+    def _default_git_commit(self):
+        if self.eval_git_commit:
+            return self.eval_git_commit
+        try:
+            return subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=Path(__file__).resolve().parents[2],
+                text=True,
+            ).strip()
+        except Exception:
+            return ""
+
+    def _prepare_eval_output(self):
+        run_id = self.eval_run_id or os.path.basename(self.args.model_path.rstrip("/"))
+        root_dir = self.eval_output_dir or os.path.join(self.args.model_path, "eval")
+        self.eval_run_dir = os.path.join(root_dir, "on_the_fly", run_id)
+        self.eval_render_dir = os.path.join(self.eval_run_dir, "renders")
+        metrics_dir = os.path.join(self.eval_run_dir, "metrics")
+        os.makedirs(metrics_dir, exist_ok=True)
+        self.eval_raw_csv_path = os.path.join(metrics_dir, "raw_metrics.csv")
+        if not os.path.exists(self.eval_raw_csv_path):
+            with open(self.eval_raw_csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    [
+                        "run_id",
+                        "dataset_id",
+                        "scene",
+                        "split",
+                        "camera_name",
+                        "iteration",
+                        "time_kind",
+                        "psnr",
+                        "ssim",
+                        "lpips",
+                        "l1",
+                        "initial_spawn_time_ms",
+                        "iteration_time_ms",
+                        "num_gaussians",
+                        "cuda_memory_allocated_mb",
+                        "cuda_memory_reserved_mb",
+                        "render_type",
+                        "use_pbr",
+                        "checkpoint",
+                        "git_commit",
+                        "render_path",
+                    ]
+                )
+
+    def _write_eval_metadata(self):
+        if not self.eval_run_dir:
+            return
+        metadata_path = os.path.join(self.eval_run_dir, "metadata.json")
+        metadata = {
+            "run_id": self.eval_run_id or os.path.basename(self.args.model_path.rstrip("/")),
+            "dataset_id": self.eval_dataset_id,
+            "scene": self.eval_scene,
+            "split": self.eval_split,
+            "model_path": self.args.model_path,
+            "eval_profile_path": self.eval_profile_path,
+            "eval_profile": self.eval_profile,
+            "git_commit": self.eval_git_commit_value,
+        }
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+
+    def should_log_eval(self, global_step, wandb_run=None):
+        wandb_profile = self.eval_profile.get("wandb", {})
+        local_profile = self.eval_profile.get("local", {})
+
+        wandb_requested = (
+            wandb_run is not None
+            and bool(wandb_profile.get("enabled", False))
+            and (
+                bool(wandb_profile.get("psnr_avg", False))
+                or bool(wandb_profile.get("ssim_avg", False))
+                or bool(wandb_profile.get("lpips_avg", False))
+                or bool(wandb_profile.get("l1_avg", False))
+            )
+        )
+
+        local_requested = (
+            self.eval_enabled
+            and bool(local_profile.get("enabled", False))
+            and (
+                bool(local_profile.get("psnr_uniq", False))
+                or bool(local_profile.get("ssim_uniq", False))
+                or bool(local_profile.get("lpips_uniq", False))
+                or bool(local_profile.get("l1_uniq", False))
+                or int(local_profile.get("save_pic_x_iter", -1)) > 0
+            )
+        )
+        return wandb_requested or local_requested
+
+    def _should_save_render_for_step(self, global_step):
+        if self.eval_save_pic_x_iter <= 0:
+            return False
+        return global_step % self.eval_save_pic_x_iter == 0
 
     def _move_key_points_to_device(self, key_points):
         key_points_torch = {}
@@ -318,9 +497,42 @@ class OnTheFly:
             print("[on_the_fly] Can't log rendered view metrics, since no camera views are provided.")
             return {}
 
+        profile = self.eval_profile
+        wandb_profile = profile.get("wandb", {})
+        local_profile = profile.get("local", {})
+
+        wandb_enabled = wandb_run is not None and bool(wandb_profile.get("enabled", False))
+        local_enabled = self.eval_enabled and bool(local_profile.get("enabled", False))
+
+        local_psnr_uniq = local_enabled and bool(local_profile.get("psnr_uniq", False))
+        local_ssim_uniq = local_enabled and bool(local_profile.get("ssim_uniq", False))
+        local_lpips_uniq = local_enabled and bool(local_profile.get("lpips_uniq", False))
+        local_l1_uniq = local_enabled and bool(local_profile.get("l1_uniq", False))
+        local_time = self.local_time_enabled
+        local_save_pic_x_iter = int(local_profile.get("save_pic_x_iter", -1))
+
+        wandb_psnr_avg = wandb_enabled and bool(wandb_profile.get("psnr_avg", False))
+        wandb_ssim_avg = wandb_enabled and bool(wandb_profile.get("ssim_avg", False))
+        wandb_lpips_avg = wandb_enabled and bool(wandb_profile.get("lpips_avg", False))
+        wandb_l1_avg = wandb_enabled and bool(wandb_profile.get("l1_avg", False))
+
+        need_psnr = local_psnr_uniq or wandb_psnr_avg
+        need_ssim = local_ssim_uniq or wandb_ssim_avg
+        need_lpips = local_lpips_uniq or wandb_lpips_avg
+        need_l1 = local_l1_uniq or wandb_l1_avg
+
+        if local_save_pic_x_iter > 0:
+            self.eval_save_pic_x_iter = local_save_pic_x_iter
+        should_save_render = local_enabled and self._should_save_render_for_step(global_step)
+
+        if not (need_psnr or need_ssim or need_lpips or need_l1 or should_save_render):
+            return {}
+
         psnr_values = []
         ssim_values = []
-
+        lpips_values = []
+        l1_values = []
+        rows = []
         for viewpoint in cameras:
             results = render_fn(
                 viewpoint,
@@ -340,31 +552,165 @@ class OnTheFly:
             pred = torch.clamp(pred, 0.0, 1.0)
             gt = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
 
-            psnr_val = psnr(pred, gt).mean().detach()
-            ssim_val = ssim(pred, gt).mean().detach()
+            psnr_val = psnr(pred, gt).mean().detach() if need_psnr else None
+            ssim_val = ssim(pred, gt).mean().detach() if need_ssim else None
+            lpips_val = lpips(pred, gt, net_type="vgg").mean().detach() if need_lpips else None
+            l1_val = F.l1_loss(pred, gt).mean().detach() if need_l1 else None
 
-            psnr_values.append(psnr_val)
-            ssim_values.append(ssim_val)
+            if psnr_val is not None:
+                psnr_values.append(psnr_val)
+            if ssim_val is not None:
+                ssim_values.append(ssim_val)
+            if lpips_val is not None:
+                lpips_values.append(lpips_val)
+            if l1_val is not None:
+                l1_values.append(l1_val)
 
-        psnr_tensor = torch.stack(psnr_values).float()
-        ssim_tensor = torch.stack(ssim_values).float()
+            render_path = ""
+            if should_save_render and self.eval_render_dir is not None:
+                iter_dir = os.path.join(self.eval_render_dir, f"iter_{global_step:06d}")
+                os.makedirs(iter_dir, exist_ok=True)
+                render_path = os.path.join(iter_dir, f"{viewpoint.image_name}.png")
+                img = pred.detach().permute(1, 2, 0).cpu().numpy()
+                img = (img * 255).astype(np.uint8)
+                Image.fromarray(img).save(render_path)
 
-        metrics = {
-            f"{split_name}/psnr_avg": psnr_tensor.mean().item(),
-            f"{split_name}/psnr_max": psnr_tensor.max().item(),
-            f"{split_name}/psnr_min": psnr_tensor.min().item(),
-            f"{split_name}/psnr_median": psnr_tensor.median().item(),
-            f"{split_name}/ssim_avg": ssim_tensor.mean().item(),
-            f"{split_name}/ssim_max": ssim_tensor.max().item(),
-            f"{split_name}/ssim_min": ssim_tensor.min().item(),
-            f"{split_name}/ssim_median": ssim_tensor.median().item(),
-        }
+            if local_enabled and self.eval_raw_csv_path:
+                if torch.cuda.is_available():
+                    cuda_alloc_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+                    cuda_reserved_mb = torch.cuda.memory_reserved() / (1024 * 1024)
+                else:
+                    cuda_alloc_mb = ""
+                    cuda_reserved_mb = ""
+                rows.append(
+                    {
+                        "run_id": self.eval_run_id or os.path.basename(self.args.model_path.rstrip("/")),
+                        "dataset_id": self.eval_dataset_id,
+                        "scene": self.eval_scene,
+                        "split": split_name or self.eval_split,
+                        "camera_name": viewpoint.image_name,
+                        "iteration": global_step,
+                        "time_kind": "",
+                        "psnr": psnr_val.item() if local_psnr_uniq and psnr_val is not None else "",
+                        "ssim": ssim_val.item() if local_ssim_uniq and ssim_val is not None else "",
+                        "lpips": lpips_val.item() if local_lpips_uniq and lpips_val is not None else "",
+                        "l1": l1_val.item() if local_l1_uniq and l1_val is not None else "",
+                        "initial_spawn_time_ms": "",
+                        "iteration_time_ms": "",
+                        "num_gaussians": int(gaussians.get_xyz.shape[0]) if hasattr(gaussians, "get_xyz") else "",
+                        "cuda_memory_allocated_mb": cuda_alloc_mb if local_time else "",
+                        "cuda_memory_reserved_mb": cuda_reserved_mb if local_time else "",
+                        "render_type": self.args.type,
+                        "use_pbr": bool(getattr(gaussians, "use_pbr", False)),
+                        "checkpoint": self.eval_checkpoint or (self.args.checkpoint or ""),
+                        "git_commit": self.eval_git_commit_value,
+                        "render_path": render_path,
+                    }
+                )
 
-        if wandb_run is not None:
-            print(f"[on_the_fly] Logging to wandb at step {global_step}: {metrics}")
+        if rows and self.eval_raw_csv_path:
+            with open(self.eval_raw_csv_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                writer.writerows(rows)
+
+        metrics = {}
+        if psnr_values and wandb_psnr_avg:
+            psnr_tensor = torch.stack(psnr_values).float()
+            metrics[f"{split_name}/psnr_avg"] = psnr_tensor.mean().item()
+        if ssim_values and wandb_ssim_avg:
+            ssim_tensor = torch.stack(ssim_values).float()
+            metrics[f"{split_name}/ssim_avg"] = ssim_tensor.mean().item()
+        if lpips_values and wandb_lpips_avg:
+            lpips_tensor = torch.stack(lpips_values).float()
+            metrics[f"{split_name}/lpips_avg"] = lpips_tensor.mean().item()
+        if l1_values and wandb_l1_avg:
+            l1_tensor = torch.stack(l1_values).float()
+            metrics[f"{split_name}/l1_avg"] = l1_tensor.mean().item()
+
+        should_log_wandb = wandb_enabled
+        if should_log_wandb and len(metrics) > 0:
             wandb_run.log(metrics, step=global_step)
 
         return metrics
+
+    def _append_time_row(self, row):
+        if not self.local_time_enabled or not self.eval_raw_csv_path:
+            return
+        with open(self.eval_raw_csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            writer.writerow(row)
+
+    def log_initial_spawn_timing(self, spawn_index, camera_name, duration_ms, num_gaussians, wandb_run=None):
+        if self.local_time_enabled:
+            if torch.cuda.is_available():
+                cuda_alloc_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+                cuda_reserved_mb = torch.cuda.memory_reserved() / (1024 * 1024)
+            else:
+                cuda_alloc_mb = ""
+                cuda_reserved_mb = ""
+            row = {
+                "run_id": self.eval_run_id or os.path.basename(self.args.model_path.rstrip("/")),
+                "dataset_id": self.eval_dataset_id,
+                "scene": self.eval_scene,
+                "split": self.eval_split,
+                "camera_name": camera_name,
+                "iteration": spawn_index,
+                "time_kind": "initial_spawn",
+                "psnr": "",
+                "ssim": "",
+                "lpips": "",
+                "l1": "",
+                "initial_spawn_time_ms": duration_ms,
+                "iteration_time_ms": "",
+                "num_gaussians": int(num_gaussians),
+                "cuda_memory_allocated_mb": cuda_alloc_mb,
+                "cuda_memory_reserved_mb": cuda_reserved_mb,
+                "render_type": self.args.type,
+                "use_pbr": "",
+                "checkpoint": self.eval_checkpoint or (self.args.checkpoint or ""),
+                "git_commit": self.eval_git_commit_value,
+                "render_path": "",
+            }
+            self._append_time_row(row)
+
+        if self.wandb_time_enabled and wandb_run is not None:
+            wandb_run.log({"timing/initial_spawn_time_ms": duration_ms}, step=spawn_index)
+
+    def log_iteration_timing(self, iteration, duration_ms, num_gaussians, wandb_run=None):
+        if self.local_time_enabled:
+            if torch.cuda.is_available():
+                cuda_alloc_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+                cuda_reserved_mb = torch.cuda.memory_reserved() / (1024 * 1024)
+            else:
+                cuda_alloc_mb = ""
+                cuda_reserved_mb = ""
+            row = {
+                "run_id": self.eval_run_id or os.path.basename(self.args.model_path.rstrip("/")),
+                "dataset_id": self.eval_dataset_id,
+                "scene": self.eval_scene,
+                "split": self.eval_split,
+                "camera_name": "",
+                "iteration": iteration,
+                "time_kind": "train_iteration",
+                "psnr": "",
+                "ssim": "",
+                "lpips": "",
+                "l1": "",
+                "initial_spawn_time_ms": "",
+                "iteration_time_ms": duration_ms,
+                "num_gaussians": int(num_gaussians),
+                "cuda_memory_allocated_mb": cuda_alloc_mb,
+                "cuda_memory_reserved_mb": cuda_reserved_mb,
+                "render_type": self.args.type,
+                "use_pbr": "",
+                "checkpoint": self.eval_checkpoint or (self.args.checkpoint or ""),
+                "git_commit": self.eval_git_commit_value,
+                "render_path": "",
+            }
+            self._append_time_row(row)
+
+        if self.wandb_time_enabled and wandb_run is not None:
+            wandb_run.log({"timing/iteration_time_ms": duration_ms}, step=iteration)
 
     def to_string(self):
         return (
@@ -375,5 +721,6 @@ class OnTheFly:
             f"base_prob={self.base_prob}, normalize_prob={self.normalize_prob}, "
             f"apply_penalty_map={self.apply_penalty_map}, neighbourhood_angle={self.neighbourhood_angle}, "
             f"dav2_target_width={self.dav2_target_width}, feature_sigma={self.feature_sigma}, "
-            f"feature_min_coverage={self.feature_min_coverage}, feature_gate_mode={self.feature_gate_mode}]"
+            f"feature_min_coverage={self.feature_min_coverage}, feature_gate_mode={self.feature_gate_mode}, "
+            f"eval_enabled={self.eval_enabled}, local_eval_enabled={self.local_eval_enabled}, eval_split={self.eval_split}]"
         )
