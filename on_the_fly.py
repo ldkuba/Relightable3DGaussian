@@ -484,6 +484,7 @@ class OnTheFly:
             global_step,
             split_name,
             cameras,
+            current_viewpoint,
             gaussians,
             render_fn,
             pipe,
@@ -533,6 +534,10 @@ class OnTheFly:
         lpips_values = []
         l1_values = []
         rows = []
+        target_save_camera_name = None
+        if current_viewpoint is not None:
+            target_save_camera_name = getattr(current_viewpoint, "image_name", None)
+
         for viewpoint in cameras:
             results = render_fn(
                 viewpoint,
@@ -567,7 +572,12 @@ class OnTheFly:
                 l1_values.append(l1_val)
 
             render_path = ""
-            if should_save_render and self.eval_render_dir is not None:
+            if (
+                should_save_render
+                and self.eval_render_dir is not None
+                and target_save_camera_name is not None
+                and viewpoint.image_name == target_save_camera_name
+            ):
                 iter_dir = os.path.join(self.eval_render_dir, f"iter_{global_step:06d}")
                 os.makedirs(iter_dir, exist_ok=True)
                 render_path = os.path.join(iter_dir, f"{viewpoint.image_name}.png")

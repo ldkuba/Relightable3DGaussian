@@ -188,6 +188,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 global_step=iteration,
                 split_name=split_name,
                 cameras=eval_cameras,
+                current_viewpoint=viewpoint_cam,
                 gaussians=scene.gaussians,
                 render_fn=render_fn,
                 pipe=pipe,
