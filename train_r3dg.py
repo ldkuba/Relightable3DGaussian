@@ -26,7 +26,6 @@ from on_the_fly import OnTheFly
 
 
 def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, on_the_fly_args: OnTheFlyParams, wandb_run=None):
-    torch.cuda.memory._record_memory_history()
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
@@ -386,7 +385,7 @@ def training_report(args, tb_writer, iteration, tb_dict, scene: Scene, renderFun
 def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pipe, opt, first_iter, iteration, pbr_kwargs):
     os.makedirs(os.path.join(args.model_path, "visualize"), exist_ok=True)
     with torch.no_grad():
-        if True:
+        if iteration % pipe.save_training_vis_iteration == 0 or iteration == first_iter + 1:
             render_pkg = render_fn(viewpoint_cam, gaussians, pipe, background,
                                    opt=opt, is_training=False, dict_params=pbr_kwargs)
 
