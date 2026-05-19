@@ -29,6 +29,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
+    torch.cuda.memory._record_memory_history(enabled="all",stacks="all", max_entries=100_000)
+
     """
     Setup Gaussians
     """

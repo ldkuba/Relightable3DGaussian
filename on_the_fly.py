@@ -722,6 +722,12 @@ class OnTheFly:
         if self.wandb_time_enabled and wandb_run is not None:
             wandb_run.log({"timing/iteration_time_ms": duration_ms}, step=iteration)
 
+    def free_gpu_mem(self):
+        self.gaussian_batches.clear()
+        del self.depth_estimator.model
+        self.depth_estimator.model = None
+        torch.cuda.empty_cache()
+
     def to_string(self):
         return (
             f"OnTheFly[device={self.DEVICE}, width={self.width}, height={self.height}, "
