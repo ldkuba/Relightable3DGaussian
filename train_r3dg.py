@@ -29,8 +29,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
-    torch.cuda.memory._record_memory_history(enabled="all",stacks="all", max_entries=100_000)
-
     """
     Setup Gaussians
     """
@@ -90,8 +88,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         # Save camera stack for debugging
         torch.save(scene.getTrainCameras(), os.path.join(dataset.model_path, "train_cams.pth"))
-
-        # torch.cuda.memory._record_memory_history()
 
     """ GUI """
     windows = None
@@ -176,12 +172,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         tb_dict = render_pkg["tb_dict"]
         loss += render_pkg["loss"]
 
-#        if wandb_run is not None:
-#            wandb_run.log({
-#                "psnr": tb_dict['psnr'],
-#                "ssim": tb_dict['ssim']
-#            }, step=iteration)
-
         if on_the_fly_obj.should_log_eval(iteration, wandb_run=wandb_run):
             split_name = on_the_fly_obj.eval_split if on_the_fly_obj.eval_split in ["train", "test"] else "train"
             eval_cameras = scene.getTestCameras() if split_name == "test" else scene.getTrainCameras()
@@ -223,13 +213,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
                 loss += loss_depth * opt.lambda_vol_depth_render
                 loss += loss_normal * opt.lambda_vol_normal_render
-
-#        if wandb_run is not None:
-#            wandb_run.log({
-#                "loss_total": loss.item(),
-#                "loss_depth_sdf": loss_depth.item() if args.diff_spsr and iteration > 10000 else 0,
-#                "loss_normal_sdf": loss_normal.item() if args.diff_spsr and iteration > 10000 else 0,
-#            }, step=iteration)
 
         loss.backward()
 
