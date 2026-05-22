@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import os
 import time
 import torch
@@ -23,11 +24,82 @@ from utils.graphics_utils import rgb_to_srgb
 from torchvision.utils import save_image, make_grid
 from lpipsPyTorch import lpips
 from on_the_fly import OnTheFly
+from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
 
+
+import wandb
+
+import visualization.visualize_covariance as vis_cov
+
+import time
+
+def process_gaussian_images(gaussian_renders, opacity_threshold=0.95, depth_variance_quantile_threshold=0.75, hit_mask=False, output_names=[]):
+
+    combined_mask = torch.ones((gaussian_renders['render'].shape[1], gaussian_renders['render'].shape[2]), dtype=torch.bool, device=gaussian_renders['render'].device)
+
+    # Filter by opacity
+    if opacity_threshold > 0:
+        opacity_gaussian = gaussian_renders['opacity']
+        opacity_max = opacity_gaussian.max().item()
+        opacity_mask = opacity_gaussian.squeeze(0) > (opacity_max * opacity_threshold)
+        combined_mask = combined_mask & opacity_mask
+
+    # Filter by depth variance
+    # TODO: Detect gaps in ray instead of just filtering out high variance pixels, which can be caused by steep edges and not just gaps
+    if depth_variance_quantile_threshold > 0:
+        depth_variance = gaussian_renders['depth_var']
+        depth_variance_quantile = torch.quantile(depth_variance, depth_variance_quantile_threshold)
+        depth_variance_mean = depth_variance.mean().item()
+        depth_variance_mask = (depth_variance.squeeze(0) < depth_variance_quantile) & (depth_variance.squeeze(0) < depth_variance_mean * 4.0)
+        combined_mask = combined_mask & depth_variance_mask
+
+    if hit_mask:
+        depth = gaussian_renders['depth']
+        hit_mask = depth.squeeze(0) > 0
+        combined_mask = combined_mask & hit_mask
+
+    output_images = {}
+    for name in output_names:
+        output_images[name] = gaussian_renders[name].clone()
+        output_images[name][:, ~combined_mask] = 0.0
+
+    return output_images, combined_mask
+
+@dataclass
+class DepthConsistencyPoints:
+    view_dir: torch.Tensor
+    points: torch.Tensor
+    normals: torch.Tensor
+    data: torch.Tensor = None
+
+def filter_depth_consistency(rgb_gaussians, depth_gaussians, normal_gaussians, args):
+    # Filter pixels by local changes of depth in small patch
+    patch_size = args.depth_consistency_patch_size
+    padding = int(np.floor(patch_size / 2))
+    depth_patches = F.unfold(depth_gaussians.unsqueeze(0), kernel_size=patch_size, padding=padding).view(patch_size * patch_size, depth_gaussians.shape[1], depth_gaussians.shape[2])
+
+    depth_patches_max = depth_patches.max(dim=0).values
+    depth_patches_min = depth_patches.min(dim=0).values
+    depth_mask = (depth_patches_max - depth_patches_min) < args.depth_consistency_depth_threshold
+
+    return depth_mask
 
 def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, on_the_fly_args: OnTheFlyParams, wandb_run=None):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
+
+    ## Start wandb run
+    # wandb_run = None
+    wandb_run = wandb.init(
+        entity="ldkuba-tu-wien",
+        project="GS-Reconstruction-Pipeline",
+        name="Separate Networks",
+        config={
+            "model_type": "R3DG",
+            "iterations": opt.iterations,
+            "smoothing_strength": args.local_smoothing_strength,
+        },
+    )
 
     """
     Setup Gaussians
@@ -37,6 +109,14 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if args.checkpoint:
         print("Create Gaussians from checkpoint {}".format(args.checkpoint))
         first_iter = gaussians.create_from_ckpt(args.checkpoint, restore_optimizer=True)
+
+    elif scene.loaded_iter:
+        gaussians.load_ply(os.path.join(dataset.model_path,
+                                        "point_cloud",
+                                        "iteration_" + str(scene.loaded_iter),
+                                        "point_cloud.ply"))
+    else:
+        gaussians.create_from_pcd(scene.scene_info.point_cloud, scene.cameras_extent)
 
     gaussians.training_setup(opt)
 
@@ -88,6 +168,15 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         # Save camera stack for debugging
         torch.save(scene.getTrainCameras(), os.path.join(dataset.model_path, "train_cams.pth"))
+
+        diff_spsr_start_iteration = 10000
+
+    """ Prepare point cache for depth consistency if enabled """
+    if args.depth_consistency_strength > 0:
+        print("Using depth consistency loss")
+        from utils.render_sdf import generate_rays
+
+        depth_consistency_cache: list[DepthConsistencyPoints] = []
 
     """ GUI """
     windows = None
@@ -191,15 +280,19 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         # Diff-SPSR
         if args.diff_spsr:
-                
-            if iteration > 10000:
+            if iteration > diff_spsr_start_iteration:
                 # SDPSR
                 sdf, variance, sdf_spacing, sdf_corner = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
+                sdf.retain_grad()
 
                 # Volumetric SDF rendering
                 depth_sdf, normal_sdf, ray_mask = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
                 depth_sdf = depth_sdf[ray_mask].unsqueeze(-1)
                 normal_sdf = normal_sdf[ray_mask]
+                normal_sdf = normal_sdf / (torch.norm(normal_sdf, dim=-1, keepdim=True) + 1e-6)
+                # depth_sdf, normal_sdf = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False)
+                depth_sdf.retain_grad()
+                normal_sdf.retain_grad()
 
                 # Rendered gaussians
                 depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
@@ -214,12 +307,202 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 loss += loss_depth * opt.lambda_vol_depth_render
                 loss += loss_normal * opt.lambda_vol_normal_render
 
+        # Local flattening of mono-color regions
+        if args.local_smoothing_strength > 0:
+
+            patch_size = args.local_smoothing_patch_size
+            num_kernel = patch_size * patch_size
+            padding = int(np.floor(patch_size / 2))
+
+            # Calculate strength of smoothing based on local variance of colors
+            outputs_gaussians, mask_gaussians = process_gaussian_images(render_pkg, depth_variance_quantile_threshold=0.90, output_names=["render", "depth"])
+            rgb_gaussians = outputs_gaussians["render"]
+            depth_gaussians = outputs_gaussians["depth"]
+
+            # Measure local color variance using 3x3 patches
+            patches_r = F.unfold(rgb_gaussians[0:1].unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, 1, rgb_gaussians.shape[1], rgb_gaussians.shape[2])
+            patches_g = F.unfold(rgb_gaussians[1:2].unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, 1, rgb_gaussians.shape[1], rgb_gaussians.shape[2])
+            patches_b = F.unfold(rgb_gaussians[2:3].unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, 1, rgb_gaussians.shape[1], rgb_gaussians.shape[2])
+            patches = torch.cat([patches_r, patches_g, patches_b], dim=1)
+            patches_distance = torch.norm(patches - rgb_gaussians.unsqueeze(0), dim=1)
+            color_variance = patches_distance.max(dim=0)
+            color_variance_mask = color_variance.values < args.color_variance_threshold
+
+            # Mask out image borders
+            border_mask = torch.ones_like(mask_gaussians)
+            border_mask[:padding, :] = False
+            border_mask[-padding:, :] = False
+            border_mask[:, :padding] = False
+            border_mask[:, -padding:] = False
+            combined_mask = color_variance_mask & mask_gaussians & border_mask
+
+            # Compute smoothed local patches
+            # Compute gradients in x and y direction
+            depth_grad_x, depth_grad_y = torch.gradient(depth_gaussians, dim=(-2, -1), edge_order=1)
+            depth_grad_x_patches = F.unfold(depth_grad_x.unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, depth_gaussians.shape[1], depth_gaussians.shape[2])
+            depth_grad_y_patches = F.unfold(depth_grad_y.unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, depth_gaussians.shape[1], depth_gaussians.shape[2])
+
+            # Filter fepth patches, to only those that will contribute to the loss
+            depth_grad_x_patches = depth_grad_x_patches[:, combined_mask]
+            depth_grad_y_patches = depth_grad_y_patches[:, combined_mask]
+
+            # Get mean gradient in x and y direction for each patch
+            mean_depth_grad_x = depth_grad_x_patches.mean(dim=0)
+            mean_depth_grad_y = depth_grad_y_patches.mean(dim=0)
+
+            # Get depth patches and filter them
+            depth_patches = F.unfold(depth_gaussians.unsqueeze(0), kernel_size=patch_size, padding=padding).view(num_kernel, depth_gaussians.shape[1], depth_gaussians.shape[2])
+            depth_patches = depth_patches[:, combined_mask]
+
+            # Tilt patches, so the normal is parallel with the view direction
+            tilt_offset = mean_depth_grad_x * (torch.arange(num_kernel, device=depth_gaussians.device) % patch_size - padding).unsqueeze(1) + mean_depth_grad_y * (torch.arange(num_kernel, device=depth_gaussians.device) // patch_size - padding).unsqueeze(1)
+            depth_patches_tilted = depth_patches - tilt_offset
+
+            # Flatten patch
+            depth_patches_tilted_smooth = depth_patches_tilted.mean(dim=0, keepdim=True).repeat(num_kernel, 1)
+
+            # Un-tilt patches
+            depth_patches_smooth = depth_patches_tilted_smooth + tilt_offset
+
+            debug_depth_delta = (depth_patches_smooth - depth_patches).abs().sum(dim=0)
+            debug_smoothing_loss = torch.zeros_like(depth_gaussians)
+            debug_smoothing_loss[:, combined_mask] = debug_depth_delta
+
+            # Compute color variance
+            local_smoothing_loss = F.mse_loss(depth_patches, depth_patches_smooth)
+            loss += local_smoothing_loss * args.local_smoothing_strength
+
+        if args.depth_consistency_strength > 0 and iteration > args.depth_consistency_start_iter:
+
+            depth_consistency_loss = torch.tensor(0.0, device='cuda')
+
+            # Check if similar view exists in cache
+            camera_primary_ray = viewpoint_cam.get_primary_axis().to('cuda')
+            camera_primary_ray = camera_primary_ray / torch.norm(camera_primary_ray, dim=-1, keepdim=True)
+
+            # Get rendered points and depths
+            gaussian_outputs, gaussians_mask = process_gaussian_images(render_pkg, depth_variance_quantile_threshold=0.90, hit_mask=True, output_names=["render", "depth", "normal"])
+            rgb_gaussians = gaussian_outputs["render"]
+            depth_gaussians = gaussian_outputs["depth"]
+            normal_gaussians = render_pkg["normal"]
+
+            cache_hit_id = None
+            for i, cache_entry in enumerate(depth_consistency_cache):
+                cache_view_dir = cache_entry.view_dir
+                angle_cos = torch.dot(cache_view_dir, camera_primary_ray)
+                angle_deg = torch.rad2deg(torch.acos(angle_cos))
+
+                # print(f"Got angle: {angle_deg:.2f}")
+                if angle_deg < args.depth_consistency_view_angle_threshold:
+                    cache_hit_id = i
+                    break
+
+            if cache_hit_id is not None:
+                # Get points and normals from cache
+                cache_hit = depth_consistency_cache.pop(cache_hit_id)
+                cache_points = cache_hit.points
+                cache_normals = cache_hit.normals
+
+                # Construct rays from camera to points and get their new depths
+                viewpoint_cam_pos = viewpoint_cam.camera_center
+                rays_to_points = cache_points - viewpoint_cam_pos.unsqueeze(0)
+                cache_depths = torch.sum(rays_to_points * camera_primary_ray, dim=-1)
+
+                # Get corresponding depths from current render (interpolate 4 pixels that are closest to rach ray)
+                # Get pixel coords of each ray
+                cache_points_homogeneous = torch.cat([cache_points, torch.ones((cache_points.shape[0], 1), device=cache_points.device)], dim=-1)
+                screen_coords = viewpoint_cam.get_proj_matrix() @ cache_points_homogeneous.transpose(0, 1)
+                screen_coords = (screen_coords[:2] / screen_coords[2]).transpose(0, 1) # N x 2
+
+                # Mask points that ended up off-screen in the new view, including leaving one pixel border in max index for interpolation
+                # TODO: verify if these coords are right. I don't remember views, that didn't see the whole object...
+                offscreen_mask = (screen_coords[:, 0] < 0) | (screen_coords[:, 0] >= viewpoint_cam.image_width - 1) | (screen_coords[:, 1] < 0) | (screen_coords[:, 1] >= viewpoint_cam.image_height - 1)
+                screen_coords = screen_coords[~offscreen_mask]
+                cache_depths = cache_depths[~offscreen_mask]
+
+                # Interpolate new depths from pixels
+                x0 = torch.floor(screen_coords[:, 0]).int()
+                x1 = x0 + 1
+                x_factor = screen_coords[:, 0] - x0.float()
+                y0 = torch.floor(screen_coords[:, 1]).int()
+                y1 = y0 + 1
+                y_factor = screen_coords[:, 1] - y0.float()
+
+                # Make sure the interpolation doesn't hit a pixel filtered by gaussian_image_processing
+                filtered_mask = gaussians_mask[x0, y0] & gaussians_mask[x1, y0] & gaussians_mask[x0, y1] & gaussians_mask[x1, y1]
+                x0 = x0[filtered_mask]
+                x1 = x1[filtered_mask]
+                x_factor = x_factor[filtered_mask]
+                y0 = y0[filtered_mask]
+                y1 = y1[filtered_mask]
+                y_factor = y_factor[filtered_mask]
+                cache_depths = cache_depths[filtered_mask]
+
+                # Images are [h, w]
+                interpolated_depths = (1 - x_factor) * (1 - y_factor) * depth_gaussians[0, y0, x0] + \
+                                      x_factor * (1 - y_factor) * depth_gaussians[0, y0, x1] + \
+                                      (1 - x_factor) * y_factor * depth_gaussians[0, y1, x0] + \
+                                      x_factor * y_factor * depth_gaussians[0, y1, x1]
+
+                # Calculate depth consistency loss
+                if interpolated_depths.shape[0] > 0:
+                    depth_consistency_loss = F.mse_loss(interpolated_depths, cache_depths)
+                    loss += depth_consistency_loss * args.depth_consistency_strength
+
+            else:
+                # === Insert points from current view into cache ===
+                # Filter out pixels that can't be used for depth consistency loss
+                filter_mask = filter_depth_consistency(rgb_gaussians, depth_gaussians, normal_gaussians, args)
+                gaussians_mask = gaussians_mask & filter_mask
+
+                # Apply masks
+                rgb_gaussians = rgb_gaussians[:, gaussians_mask]
+                depth_gaussians = depth_gaussians[:, gaussians_mask]
+                normal_gaussians = normal_gaussians[:, gaussians_mask]
+
+                # Channel last
+                rgb_gaussians = rgb_gaussians.permute(1, 0)
+                depth_gaussians = depth_gaussians.permute(1, 0)
+                normal_gaussians = normal_gaussians.permute(1, 0)
+
+                # Normalize normals
+                normal_gaussians = normal_gaussians / torch.norm(normal_gaussians, dim=-1, keepdim=True)
+
+                # Generate rays
+                rays_o, rays_d = generate_rays(viewpoint_cam)
+                rays_d = rays_d[gaussians_mask.flatten()]
+
+                # Unproject points
+                ray_projections = torch.sum(rays_d * camera_primary_ray, dim=-1)
+                rays_d = rays_d / ray_projections.unsqueeze(-1)
+                points_gaussians = rays_o[None, :] + rays_d * depth_gaussians
+
+                depth_consistency_cache.append(DepthConsistencyPoints(view_dir=camera_primary_ray, points=points_gaussians.detach(), normals=normal_gaussians.detach()))
+
         loss.backward()
+
+
+        if wandb_run is not None:
+            wandb_run.log({
+                "loss_total": loss.item(),
+                "psnr": tb_dict["psnr"]
+            }, step=iteration)
+
+            if args.depth_consistency_strength > 0 and iteration > args.depth_consistency_start_iter:
+                wandb_run.log({
+                    "depth_consistency_cache_size": len(depth_consistency_cache),
+                    "loss_depth_consistency": depth_consistency_loss.item(),
+                }, step=iteration)
+
+            if args.local_smoothing_strength > 0:
+                wandb_run.log({
+                    "loss_smoothing": local_smoothing_loss.item(),
+                }, step=iteration)
 
         with torch.no_grad():
             if pipe.save_training_vis:
                 save_training_vis(args, viewpoint_cam, gaussians, background, render_fn,
-                                  pipe, opt, first_iter, iteration, pbr_kwargs)
+                                  pipe, opt, first_iter, iteration, debug_smoothing_loss if args.local_smoothing_strength > 0 else None, pbr_kwargs)
             # Progress bar
             pbar_dict = {"num": gaussians.get_xyz.shape[0]}
             if args.is_pbr:
@@ -273,7 +556,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                     num_gaussians=gaussians.get_xyz.shape[0],
                     wandb_run=wandb_run,
                 )
-            
+
             # save checkpoints
             if iteration % args.save_interval == 0 or iteration == args.iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
@@ -296,6 +579,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
     if dataset.eval:
         eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs)
+
+    wandb_run.finish()
 
     return gaussians
 
@@ -367,7 +652,7 @@ def training_report(args, tb_writer, iteration, tb_dict, scene: Scene, renderFun
         torch.cuda.empty_cache()
 
 
-def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pipe, opt, first_iter, iteration, pbr_kwargs):
+def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pipe, opt, first_iter, iteration, smoothing_loss, pbr_kwargs):
     os.makedirs(os.path.join(args.model_path, "visualize"), exist_ok=True)
     with torch.no_grad():
         if iteration % pipe.save_training_vis_iteration == 0 or iteration == first_iter + 1:
@@ -403,6 +688,9 @@ def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pip
                     rgb_to_srgb(env_0),
                     rgb_to_srgb(env_1),
                 ])
+
+            if smoothing_loss is not None:
+                visualization_list.append((smoothing_loss / smoothing_loss.max()).repeat(3, 1, 1))
 
             grid = torch.stack(visualization_list, dim=0)
             grid = make_grid(grid, nrow=4)
@@ -492,7 +780,18 @@ def main(args, wandb_run=None):
 
     # Diff PSR args
     parser.add_argument("--diff-spsr", action='store_true', default=False, help='use diff-spsr for reconstruction')
-    # ...other args...
+
+    # Local smoothing args
+    parser.add_argument("--local-smoothing-strength", type=float, default=0, help='local smoothing for flat, mono-color regions')
+    parser.add_argument("--color-variance-threshold", type=float, default=0.05, help='threshold for color variance to apply local smoothing')
+    parser.add_argument("--local-smoothing-patch-size", type=int, default=3, help='patch size for local smoothing')
+
+    # Depth consistency
+    parser.add_argument("--depth-consistency-strength", type=float, default=0, help='enforce depth consistency by projecting point cache')
+    parser.add_argument("--depth-consistency-start-iter", type=int, default=10000, help='iteration to start applying depth consistency loss')
+    parser.add_argument("--depth-consistency-patch-size", type=int, default=3, help='patch size for rejecting points for depth consistency')
+    parser.add_argument("--depth-consistency-depth-threshold", type=float, default=0.01, help='depth delta threshold for rejecting points for depth consistency')
+    parser.add_argument("--depth-consistency-view-angle-threshold", type=float, default=30.0, help='angle threshold (in degrees) for considering points for depth consistency based on their original view direction and current view direction')
 
     args = parser.parse_args(args)
     print(f"Current model path: {args.model_path}")
