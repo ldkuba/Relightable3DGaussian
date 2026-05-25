@@ -7,6 +7,8 @@ import torchvision
 from collections import defaultdict
 from random import randint
 
+import eval_manager
+from eval_manager import EvalManager
 from utils.loss_utils import ssim
 from gaussian_renderer import render_fn_dict
 import sys
@@ -16,7 +18,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr, visualize_depth
 from utils.system_utils import prepare_output_and_logger
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, OptimizationParams, OnTheFlyParams
+from arguments import ModelParams, PipelineParams, OptimizationParams, OnTheFlyParams, EvalParams
 from gui import GUI
 from scene.direct_light_map import DirectLightMap
 from utils.graphics_utils import rgb_to_srgb
@@ -77,7 +79,7 @@ def filter_depth_consistency(rgb_gaussians, depth_gaussians, normal_gaussians, a
 
     return depth_mask
 
-def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, on_the_fly_args: OnTheFlyParams):
+def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, on_the_fly_args: OnTheFlyParams, evaluation_args: EvalParams):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
@@ -105,14 +107,14 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     """
     pbr_kwargs = dict()
     if args.is_pbr:
-        
+
         # first update visibility
         gaussians.update_visibility(pipe.sample_num)
-        
+
         pbr_kwargs['sample_num'] = pipe.sample_num
         print("Using global incident light for regularization.")
         direct_env_light = DirectLightMap(dataset.env_resolution, opt.light_init)
-        
+
         if args.checkpoint:
             env_checkpoint = os.path.dirname(args.checkpoint) + "/env_light_" + os.path.basename(args.checkpoint)
             print("Trying to load global incident light from ", env_checkpoint)
@@ -133,11 +135,12 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if pipe.on_the_fly:
         tmp = scene.getTrainCameras()[0]
         on_the_fly_obj = OnTheFly(width=tmp.image_width, height=tmp.image_height, max_sh_degree=dataset.sh_degree,
-                                  otfp=on_the_fly_args, dataset=dataset, args=args, scene_info=scene.scene_info, render_fn=render_fn, pipe=pipe, pbr_kwargs=pbr_kwargs, opt=opt)
-        track_runtime_timing = on_the_fly_obj.local_time_enabled or on_the_fly_obj.wandb_time_enabled
+                                  otfp=on_the_fly_args, dataset=dataset, args=args, scene_info=scene.scene_info,
+                                  render_fn=render_fn, pipe=pipe, pbr_kwargs=pbr_kwargs, opt=opt)
 
         on_the_fly_obj.init_neighbourhood(scene.getTrainCameras())
 
+    eval_man = EvalManager(ep=evaluation_args, args=args, enabled=pipe.eval_wandb, name=pipe.wandb_name)
     """ Prepare Diff-SPSR if enabled """
     if args.diff_spsr:
         import sdpsr.sdpsr_approx as sdpsr
@@ -179,7 +182,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     ema_dict_for_log = defaultdict(int)
     progress_bar = tqdm(range(first_iter + 1, opt.iterations + 1), desc="Training progress",
                         initial=first_iter, total=opt.iterations)
-    
+
     torch.autograd.set_detect_anomaly(True)
 
     initial_progb = tqdm(range(0, len(scene.getTrainCameras())), desc="Initial gaussian spawning",
@@ -191,20 +194,9 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         for iter in initial_progb:
             viewpoint_cam = viewpoint_stack_on_the_fly.pop()
             if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
-                spawn_start_time = time.perf_counter() if track_runtime_timing else None
                 on_the_fly_obj.add_gaussians(gaussians, viewpoint_cam)
-                if track_runtime_timing:
-                    spawn_elapsed_ms = (time.perf_counter() - spawn_start_time) * 1000.0
-                    on_the_fly_obj.log_initial_spawn_timing(
-                        spawn_index=iter + 1,
-                        camera_name=viewpoint_cam.image_name,
-                        duration_ms=spawn_elapsed_ms,
-                        num_gaussians=gaussians.get_xyz.shape[0]
-                    )
 
     for iteration in progress_bar:
-        if pipe.on_the_fly:
-            iter_start_time = time.perf_counter() if track_runtime_timing else None
         gaussians.update_learning_rate(iteration)
 
         if windows is not None:
@@ -213,7 +205,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
-        
+
         # Every 1000 update visibility
         # if args.is_pbr and iteration % 1000 == 0:
         #     gaussians.update_visibility(pipe.sample_num)
@@ -239,22 +231,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         # Loss
         tb_dict = render_pkg["tb_dict"]
         loss += render_pkg["loss"]
-
-        if pipe.on_the_fly and on_the_fly_obj.should_log_eval(iteration):
-            split_name = on_the_fly_obj.eval_split if on_the_fly_obj.eval_split in ["train", "test"] else "train"
-            eval_cameras = scene.getTestCameras() if split_name == "test" else scene.getTrainCameras()
-            on_the_fly_obj.log_rendered_view_metrics_summary(
-                global_step=iteration,
-                split_name=split_name,
-                cameras=eval_cameras,
-                current_viewpoint=viewpoint_cam,
-                gaussians=scene.gaussians,
-                render_fn=render_fn,
-                pipe=pipe,
-                background=background,
-                opt=opt,
-                **pbr_kwargs,
-            )
 
         # Diff-SPSR
         if args.diff_spsr:
@@ -480,15 +456,17 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                             scene, render_fn, pipe=pipe,
                             bg_color=background, dict_params=pbr_kwargs)
 
+            eval_man.log(iteration, scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs)
+
             # densification
             # TODO: Use variance to influence densification
             if iteration < opt.densify_until_iter:
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, 
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter,
                                                     render_pkg['weights'])
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
                                                                         radii[visibility_filter])
-                
+
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     densify_grad_normal_threshold = opt.densify_grad_normal_threshold if iteration > opt.normal_densify_from_iter else 99999
@@ -508,21 +486,13 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 except:
                     pass
 
-            if pipe.on_the_fly and track_runtime_timing:
-                iter_elapsed_ms = (time.perf_counter() - iter_start_time) * 1000.0
-                on_the_fly_obj.log_iteration_timing(
-                    iteration=iteration,
-                    duration_ms=iter_elapsed_ms,
-                    num_gaussians=gaussians.get_xyz.shape[0]
-                )
-
             # save checkpoints
             if iteration % args.save_interval == 0 or iteration == args.iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
             if iteration % args.checkpoint_interval == 0 or iteration == args.iterations:
-                
+
                 torch.save((gaussians.capture(), iteration),
                            os.path.join(scene.model_path, "chkpnt" + str(iteration) + ".pth"))
 
@@ -627,7 +597,7 @@ def save_training_vis(args, viewpoint_cam, gaussians, background, render_fn, pip
             ]
 
             if args.is_pbr:
-                
+
                 H, W = render_pkg["pbr"].shape[1:]
                 env = F.interpolate(render_pkg['env'].permute(0, 3, 1, 2), (H, 2*W))
                 env_0 = env[0, :, :, :W]
@@ -725,6 +695,7 @@ def main(args):
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     otfp = OnTheFlyParams(parser)
+    ep = EvalParams(parser)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument('--gui', action='store_true', default=False, help="use gui")
@@ -764,7 +735,7 @@ def main(args):
 
     args.is_pbr = args.type in ['neilf']
 
-    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args), otfp.extract(args))
+    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args), otfp.extract(args), ep.extract(args))
     print("\nTraining complete.")
     return gaussians
 

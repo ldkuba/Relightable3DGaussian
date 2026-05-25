@@ -69,6 +69,8 @@ class PipelineParams(ParamGroup):
         self.save_training_vis = False
         self.save_training_vis_iteration = 1000
         self.on_the_fly = False
+        self.eval_wandb = False
+        self.wandb_name = "unnamed"
         super().__init__(parser, "Pipeline Parameters")
 
 class OnTheFlyParams(ParamGroup):
@@ -90,7 +92,10 @@ class OnTheFlyParams(ParamGroup):
         self.feature_min_coverage = 0.05
         self.feature_gate_mode = "multiply" # 'multiply' or 'hard'
         self.apply_penalty_map = False
-        self.eval_enabled = False
+        super().__init__(parser, "On The Fly Parameters")
+
+class EvalParams(ParamGroup):
+    def __init__(self, parser):
         self.eval_profile_path = ""
         self.eval_output_dir = ""
         self.eval_run_id = ""
@@ -100,7 +105,7 @@ class OnTheFlyParams(ParamGroup):
         self.eval_checkpoint = ""
         self.eval_git_commit = ""
         self.eval_save_pic_x_iter = -1
-        super().__init__(parser, "Pipeline Parameters")
+        super().__init__(parser, "Evaluation Parameters")
 
 
 class OptimizationParams(ParamGroup):
