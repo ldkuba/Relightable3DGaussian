@@ -7,7 +7,6 @@ import torchvision
 from collections import defaultdict
 from random import randint
 
-
 from utils.loss_utils import ssim
 from gaussian_renderer import render_fn_dict
 import sys
@@ -24,12 +23,6 @@ from utils.graphics_utils import rgb_to_srgb
 from torchvision.utils import save_image, make_grid
 from lpipsPyTorch import lpips
 from on_the_fly import OnTheFly
-from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
-
-
-import wandb
-
-import visualization.visualize_covariance as vis_cov
 
 import time
 
@@ -84,22 +77,9 @@ def filter_depth_consistency(rgb_gaussians, depth_gaussians, normal_gaussians, a
 
     return depth_mask
 
-def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, on_the_fly_args: OnTheFlyParams, wandb_run=None):
+def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, on_the_fly_args: OnTheFlyParams):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-
-    ## Start wandb run
-    # wandb_run = None
-    wandb_run = wandb.init(
-        entity="ldkuba-tu-wien",
-        project="GS-Reconstruction-Pipeline",
-        name="Separate Networks",
-        config={
-            "model_type": "R3DG",
-            "iterations": opt.iterations,
-            "smoothing_strength": args.local_smoothing_strength,
-        },
-    )
 
     """
     Setup Gaussians
@@ -154,7 +134,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         tmp = scene.getTrainCameras()[0]
         on_the_fly_obj = OnTheFly(width=tmp.image_width, height=tmp.image_height, max_sh_degree=dataset.sh_degree,
                                   otfp=on_the_fly_args, dataset=dataset, args=args, scene_info=scene.scene_info, render_fn=render_fn, pipe=pipe, pbr_kwargs=pbr_kwargs, opt=opt)
-        track_runtime_timing = on_the_fly_obj.local_time_enabled or (wandb_run is not None and on_the_fly_obj.wandb_time_enabled)
+        track_runtime_timing = on_the_fly_obj.local_time_enabled or on_the_fly_obj.wandb_time_enabled
 
         on_the_fly_obj.init_neighbourhood(scene.getTrainCameras())
 
@@ -219,8 +199,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                         spawn_index=iter + 1,
                         camera_name=viewpoint_cam.image_name,
                         duration_ms=spawn_elapsed_ms,
-                        num_gaussians=gaussians.get_xyz.shape[0],
-                        wandb_run=wandb_run,
+                        num_gaussians=gaussians.get_xyz.shape[0]
                     )
 
     for iteration in progress_bar:
@@ -261,7 +240,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         tb_dict = render_pkg["tb_dict"]
         loss += render_pkg["loss"]
 
-        if pipe.on_the_fly and on_the_fly_obj.should_log_eval(iteration, wandb_run=wandb_run):
+        if pipe.on_the_fly and on_the_fly_obj.should_log_eval(iteration):
             split_name = on_the_fly_obj.eval_split if on_the_fly_obj.eval_split in ["train", "test"] else "train"
             eval_cameras = scene.getTestCameras() if split_name == "test" else scene.getTrainCameras()
             on_the_fly_obj.log_rendered_view_metrics_summary(
@@ -274,7 +253,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 pipe=pipe,
                 background=background,
                 opt=opt,
-                wandb_run=wandb_run,
                 **pbr_kwargs,
             )
 
@@ -481,24 +459,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         loss.backward()
 
-
-        if wandb_run is not None:
-            wandb_run.log({
-                "loss_total": loss.item(),
-                "psnr": tb_dict["psnr"]
-            }, step=iteration)
-
-            if args.depth_consistency_strength > 0 and iteration > args.depth_consistency_start_iter:
-                wandb_run.log({
-                    "depth_consistency_cache_size": len(depth_consistency_cache),
-                    "loss_depth_consistency": depth_consistency_loss.item(),
-                }, step=iteration)
-
-            if args.local_smoothing_strength > 0:
-                wandb_run.log({
-                    "loss_smoothing": local_smoothing_loss.item(),
-                }, step=iteration)
-
         with torch.no_grad():
             if pipe.save_training_vis:
                 save_training_vis(args, viewpoint_cam, gaussians, background, render_fn,
@@ -518,7 +478,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
             # Log and save
             training_report(args, tb_writer, iteration, tb_dict,
                             scene, render_fn, pipe=pipe,
-                            bg_color=background, dict_params=pbr_kwargs, wandb_run=wandb_run)
+                            bg_color=background, dict_params=pbr_kwargs)
 
             # densification
             # TODO: Use variance to influence densification
@@ -553,8 +513,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 on_the_fly_obj.log_iteration_timing(
                     iteration=iteration,
                     duration_ms=iter_elapsed_ms,
-                    num_gaussians=gaussians.get_xyz.shape[0],
-                    wandb_run=wandb_run,
+                    num_gaussians=gaussians.get_xyz.shape[0]
                 )
 
             # save checkpoints
@@ -580,14 +539,12 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if dataset.eval:
         eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs)
 
-    wandb_run.finish()
-
     return gaussians
 
 
 def training_report(args, tb_writer, iteration, tb_dict, scene: Scene, renderFunc, pipe,
                     bg_color: torch.Tensor, scaling_modifier=1.0, override_color=None,
-                    opt: OptimizationParams = None, is_training=False, wandb_run=None, **kwargs):
+                    opt: OptimizationParams = None, is_training=False, **kwargs):
     if tb_writer:
         for key in tb_dict:
             tb_writer.add_scalar(f'train_loss_patches/{key}', tb_dict[key], iteration)
@@ -761,7 +718,7 @@ def eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kw
     print("\n[ITER {}] Evaluating {}: PSNR {} SSIM {} LPIPS {}".format(args.iterations, "test", psnr_test, ssim_test,
                                                                        lpips_test))
 
-def main(args, wandb_run=None):
+def main(args):
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)
@@ -807,7 +764,7 @@ def main(args, wandb_run=None):
 
     args.is_pbr = args.type in ['neilf']
 
-    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args), otfp.extract(args), wandb_run=wandb_run)
+    gaussians = training(args, lp.extract(args), op.extract(args), pp.extract(args), otfp.extract(args))
     print("\nTraining complete.")
     return gaussians
 
