@@ -183,7 +183,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, debug=False):
                                            debug=debug)
     cam_infos = sorted(cam_infos_unsorted.copy(), key=lambda x: x.image_name)
 
-    if "DTU" in path and not debug:
+    if ("DTU" in path or "dtu" in path) and not debug:
         test_indexes = [2, 12, 17, 30, 34]
         train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx not in test_indexes]
         test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx in test_indexes]

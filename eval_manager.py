@@ -27,8 +27,8 @@ class EvalManager:
         if iteration % 10 != 0:
             return None
 
-        train_cameras = scene.getTrainCameras()
-        if not train_cameras:
+        test_cameras = scene.getTestCameras()
+        if not test_cameras:
             print(f"[ITER {iteration}] EvalManager: no train cameras available, skipping wandb eval log.")
             return None
 
@@ -37,7 +37,7 @@ class EvalManager:
         render_kwargs["iteration"] = iteration
 
         with torch.no_grad():
-            for viewpoint in train_cameras:
+            for viewpoint in test_cameras:
                 render_pkg = render_fn(
                     viewpoint,
                     gaussians,
