@@ -98,17 +98,23 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     tb_writer = prepare_output_and_logger(dataset)
 
     ## Start wandb run
-    if args.wandb:
+    if args.wandb_name is not None:
         wandb_run = wandb.init(
             entity="ldkuba-tu-wien",
             project="GS-Reconstruction-Pipeline",
-            name="Separate Networks",
+            name=args.wandb_name,
             config={
-                "model_type": "R3DG",
+                "model_type": "r3dg_pbr" if args.is_pbr else "r3dg_init",
+                "dataset": dataset._source_path,
                 "iterations": opt.iterations,
-                "smoothing_strength": args.local_smoothing_strength,
+                "diff-spsr": args.diff_spsr,
+                "local_smoothing_strength": args.local_smoothing_strength,
+                "depth_consistency_strength": args.depth_consistency_strength,
+                "resolution": dataset._resolution
             },
         )
+    else:
+        wandb_run = None
 
     """
     Setup Gaussians
@@ -311,7 +317,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
             # depth_grad_variance_mean = depth_grad_variance.mean()
             # depth_grad_variance = torch.clamp(depth_grad_variance, min=0.0, max=depth_grad_variance_mean.item() * 5.0)
-            loss += depth_grad_variance.mean() * args.local_smoothing_strength
+            local_smoothing_loss = depth_grad_variance.mean()
+            loss += local_smoothing_loss * args.local_smoothing_strength
 
             depth_grad_variance = depth_grad_variance.detach()
             depth_grad_variance = depth_grad_variance / depth_grad_variance.max()
@@ -476,7 +483,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         loss.backward()
         
 
-        if args.wandb:
+        if wandb_run is not None:
             wandb_run.log({
                 "loss_total": loss.item(),
                 "psnr": tb_dict["psnr"]
@@ -484,9 +491,9 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
             if args.local_smoothing_strength > 0 and iteration > args.local_smoothing_start_iter:
                 pass
-                # wandb_run.log({
-                #     "loss_smoothing": local_smoothing_loss.item(),
-                # }, step=iteration)
+                wandb_run.log({
+                    "loss_smoothing": local_smoothing_loss.item(),
+                }, step=iteration)
 
             if args.depth_consistency_strength > 0 and iteration > args.depth_consistency_start_iter:
                 wandb_run.log({
@@ -565,7 +572,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if dataset.eval:
         eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs)
 
-    if args.wandb:
+    if wandb_run is not None:
         wandb_run.finish()
 
     return gaussians, sdpsr_model if args.diff_spsr else None
@@ -785,7 +792,7 @@ def main(args):
     parser.add_argument("--depth-consistency-view-angle-threshold", type=float, default=30.0, help='angle threshold (in degrees) for considering points for depth consistency based on their original view direction and current view direction')
     parser.add_argument("--depth-consistency-depth-variance-threshold", type=float, default=0.1, help='threshold for depth variance in a patch to consider points for depth consistency')
 
-    parser.add_argument("--wandb", action="store_true", help="use wandb for logging")
+    parser.add_argument("--wandb-name", type=str, default=None, help="name for wandb logging")
 
     args = parser.parse_args(args)
     print(f"Current model path: {args.model_path}")
