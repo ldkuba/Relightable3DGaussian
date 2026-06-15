@@ -98,17 +98,17 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     tb_writer = prepare_output_and_logger(dataset)
 
     ## Start wandb run
-    # wandb_run = None
-    wandb_run = wandb.init(
-        entity="ldkuba-tu-wien",
-        project="GS-Reconstruction-Pipeline",
-        name="Separate Networks",
-        config={
-            "model_type": "R3DG",
-            "iterations": opt.iterations,
-            "smoothing_strength": args.local_smoothing_strength,
-        },
-    )
+    if args.wandb:
+        wandb_run = wandb.init(
+            entity="ldkuba-tu-wien",
+            project="GS-Reconstruction-Pipeline",
+            name="Separate Networks",
+            config={
+                "model_type": "R3DG",
+                "iterations": opt.iterations,
+                "smoothing_strength": args.local_smoothing_strength,
+            },
+        )
 
     """
     Setup Gaussians
@@ -166,12 +166,10 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         sdpsr_model = sdpsr.SDPSRApprox(res=(128, 128, 128), sigma_cov=0.003, sampling_density_factor=0.7, compute_laplace=False, compute_point_variance=False)
 
         import utils.render_sdf as render_sdf
-        sdf_renderer = render_sdf.SDFRenderer(n_samples=64, n_importance=64, up_sample_steps=4)
+        sdf_renderer = render_sdf.SDFRenderer(n_samples=64, n_importance=64, up_sample_steps=4, simple_upsample=True)
 
         # Save camera stack for debugging
         torch.save(scene.getTrainCameras(), os.path.join(dataset.model_path, "train_cams.pth"))
-
-        diff_spsr_start_iteration = 10000
 
     """ Prepare point cache for depth consistency if enabled """
     if args.depth_consistency_strength > 0:
@@ -251,24 +249,20 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         # Diff-SPSR
         if args.diff_spsr:
-            if iteration > diff_spsr_start_iteration:
+            if iteration > args.diff_spsr_start_iteration:
                 # SDPSR
-                sdf, variance, sdf_spacing, sdf_corner = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
-                sdf.retain_grad()
+                sdf, variance, sdf_spacing, sdf_corner, _ = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
 
                 # Volumetric SDF rendering
-                depth_sdf, normal_sdf, ray_mask = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
+                depth_sdf, normal_sdf, ray_mask, _ = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
                 depth_sdf = depth_sdf[ray_mask].unsqueeze(-1)
                 normal_sdf = normal_sdf[ray_mask]
                 normal_sdf = normal_sdf / (torch.norm(normal_sdf, dim=-1, keepdim=True) + 1e-6)
-                # depth_sdf, normal_sdf = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False)
-                depth_sdf.retain_grad()
-                normal_sdf.retain_grad()
 
                 # Rendered gaussians
                 depth_gaussian, normal_gaussian = render_pkg["depth"], render_pkg["normal"]
-                selected_depth_gaussian = depth_gaussian.flatten(1, -1).permute(1, 0)[ray_mask]
-                selected_normal_gaussian = normal_gaussian.flatten(1, -1).permute(1, 0)[ray_mask]
+                selected_depth_gaussian = depth_gaussian.permute(2, 1, 0)[ray_mask]
+                selected_normal_gaussian = normal_gaussian.permute(2, 1, 0)[ray_mask]
 
                 normal_dot = (normal_sdf * selected_normal_gaussian).sum(dim=-1)
 
@@ -482,7 +476,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         loss.backward()
         
 
-        if wandb_run is not None:
+        if args.wandb:
             wandb_run.log({
                 "loss_total": loss.item(),
                 "psnr": tb_dict["psnr"]
@@ -571,9 +565,10 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if dataset.eval:
         eval_render(args, scene, gaussians, render_fn, pipe, background, opt, pbr_kwargs)
 
-    wandb_run.finish()
+    if args.wandb:
+        wandb_run.finish()
 
-    return gaussians
+    return gaussians, sdpsr_model if args.diff_spsr else None
 
 
 def training_report(args, tb_writer, iteration, tb_dict, scene: Scene, renderFunc, pipe,
@@ -771,6 +766,7 @@ def main(args):
 
     # Diff PSR args
     parser.add_argument("--diff-spsr", action='store_true', default=False, help='use diff-spsr for reconstruction')
+    parser.add_argument("--diff-spsr-start-iteration", type=int, default=4000, help='iteration to start applying diff-spsr loss')
 
     # Common
     parser.add_argument("--color-variance-threshold", type=float, default=0.005, help='threshold for color variance to apply local smoothing')
@@ -788,6 +784,8 @@ def main(args):
     parser.add_argument("--depth-consistency-patch-size", type=int, default=3, help='patch size for rejecting points for depth consistency')
     parser.add_argument("--depth-consistency-view-angle-threshold", type=float, default=30.0, help='angle threshold (in degrees) for considering points for depth consistency based on their original view direction and current view direction')
     parser.add_argument("--depth-consistency-depth-variance-threshold", type=float, default=0.1, help='threshold for depth variance in a patch to consider points for depth consistency')
+
+    parser.add_argument("--wandb", action="store_true", help="use wandb for logging")
 
     args = parser.parse_args(args)
     print(f"Current model path: {args.model_path}")

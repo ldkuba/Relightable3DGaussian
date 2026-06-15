@@ -418,6 +418,10 @@ def readNeILFInfo(path, white_background, eval, debug=False):
     normals = pcd.normals
     colors = pcd.colors
 
+    # # Save out scaling matrix for later use in evaluation
+    # with open(f"{path}/inputs/model/scale.npy", "wb") as f:
+    #     np.save(f, inv_scale_mat)
+
     storePly(ply_path, xyz, colors * 255, normals)
 
     try:
