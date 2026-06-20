@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import numpy as np
-from utils.graphics_utils import getWorld2View2, getProjectionMatrix, getProjectionMatrixCenterShift
+from ..utils.graphics_utils import getWorld2View2, getProjectionMatrix, getProjectionMatrixCenterShift
 
 
 class Camera(nn.Module):

@@ -1,18 +1,17 @@
 import json
 import os
 import cv2
-from gaussian_renderer import render_fn_dict
+from .gaussian_renderer import render_fn_dict
 import numpy as np
 import torch
-from scene import GaussianModel
+from .scene import GaussianModel
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams
-from scene.cameras import Camera
-from scene.envmap import EnvLight
-from utils.graphics_utils import focal2fov, fov2focal
+from .arguments import ModelParams, PipelineParams
+from .scene.cameras import Camera
+from .scene.envmap import EnvLight
+from .utils.graphics_utils import focal2fov, fov2focal, rgb_to_srgb
 from torchvision.utils import save_image
 from tqdm import tqdm
-from utils.graphics_utils import rgb_to_srgb
 
 
 def load_json_config(json_file):

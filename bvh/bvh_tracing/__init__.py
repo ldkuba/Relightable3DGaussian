@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.cpp_extension import load
-from utils.general_utils import build_rotation
+from ...utils.general_utils import build_rotation
 
 from bvh_tracing import _C
 

@@ -2,12 +2,12 @@ import math
 import torch
 import numpy as np
 import torch.nn.functional as F
-from arguments import OptimizationParams
-from scene.cameras import Camera
-from scene.gaussian_model import GaussianModel
-from scene.derect_light_sh import DirectLightEnv
-from utils.sh_utils import eval_sh, eval_sh_coef
-from utils.graphics_utils import fibonacci_sphere_sampling
+from ..arguments import OptimizationParams
+from ..scene.cameras import Camera
+from ..scene.gaussian_model import GaussianModel
+from ..scene.derect_light_sh import DirectLightEnv
+from ..utils.sh_utils import eval_sh, eval_sh_coef
+from ..utils.graphics_utils import fibonacci_sphere_sampling
 from .r3dg_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
 

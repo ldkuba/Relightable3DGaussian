@@ -5,7 +5,7 @@ import numpy as np
 import nvdiffrast.torch as dr
 import imageio
 import pyexr
-from utils.graphics_utils import srgb_to_rgb
+from ..utils.graphics_utils import srgb_to_rgb
 imageio.plugins.freeimage.download()
 
 class EnvLight(torch.nn.Module):

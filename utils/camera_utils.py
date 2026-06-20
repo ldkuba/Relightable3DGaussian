@@ -4,8 +4,8 @@ from tqdm import tqdm
 import torch
 import torchvision
 from torchvision.transforms.functional import InterpolationMode
-from scene.cameras import Camera
-from utils.graphics_utils import focal2fov
+from ..scene.cameras import Camera
+from .graphics_utils import focal2fov
 
 WARNED = False
 

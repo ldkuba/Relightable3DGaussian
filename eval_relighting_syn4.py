@@ -1,20 +1,20 @@
 import json
 import os
-from gaussian_renderer import render_fn_dict
+from .gaussian_renderer import render_fn_dict
 import numpy as np
 import torch
-from scene import GaussianModel
+from .scene import GaussianModel
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, get_combined_args
-from scene.cameras import Camera
-from scene.envmap import EnvLight
-from utils.graphics_utils import focal2fov, fov2focal
+from .arguments import ModelParams, PipelineParams, get_combined_args
+from .scene.cameras import Camera
+from .scene.envmap import EnvLight
+from .utils.graphics_utils import focal2fov, fov2focal
 from torchvision.utils import save_image
 from tqdm import tqdm
-from lpipsPyTorch import lpips
-from utils.loss_utils import ssim
-from utils.image_utils import psnr
-from scene.utils import load_img_rgb
+from .lpipsPyTorch import lpips
+from .utils.loss_utils import ssim
+from .utils.image_utils import psnr
+from .scene.utils import load_img_rgb
 import warnings
 warnings.filterwarnings("ignore")
 

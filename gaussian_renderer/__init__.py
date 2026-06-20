@@ -1,5 +1,5 @@
-from gaussian_renderer.render import render
-from gaussian_renderer.neilf import render_neilf
+from .render import render
+from .neilf import render_neilf
 
 
 render_fn_dict = {

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from arguments import OptimizationParams
+from ..arguments import OptimizationParams
 
 
 class DirectLightEnv:

@@ -13,16 +13,16 @@ import torch
 import os
 from tqdm import tqdm
 from os import makedirs
-from gaussian_renderer import render_fn_dict
+from .gaussian_renderer import render_fn_dict
 from torchvision.utils import save_image
-from utils.general_utils import safe_state
+from .utils.general_utils import safe_state
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, get_combined_args
-from scene import Scene, GaussianModel
-from scene.direct_light_map import DirectLightMap
-from lpipsPyTorch import lpips
-from utils.loss_utils import ssim
-from utils.image_utils import psnr
+from .arguments import ModelParams, PipelineParams, get_combined_args
+from .scene import Scene, GaussianModel
+from .scene.direct_light_map import DirectLightMap
+from .lpipsPyTorch import lpips
+from .utils.loss_utils import ssim
+from .utils.image_utils import psnr
 
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, pbr_kwargs=None):

@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from arguments import OptimizationParams
-from utils.sh_utils import eval_sh, eval_sh_coef
+from ..arguments import OptimizationParams
+from ..utils.sh_utils import eval_sh, eval_sh_coef
 import nvdiffrast.torch as dr
 import torch.nn.functional as F
 

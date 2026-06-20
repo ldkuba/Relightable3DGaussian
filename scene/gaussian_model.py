@@ -3,18 +3,15 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from utils.graphics_utils import BasicPointCloud
-from utils.general_utils import strip_symmetric, build_scaling_rotation
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
-from utils.general_utils import rotation_to_quaternion, quaternion_multiply
-from utils.sh_utils import RGB2SH, eval_sh
-from utils.system_utils import mkdir_p
+from ..utils.graphics_utils import BasicPointCloud, fibonacci_sphere_sampling
+from ..utils.general_utils import strip_symmetric, build_scaling_rotation, inverse_sigmoid, get_expon_lr_func, build_rotation, rotation_to_quaternion, quaternion_multiply
+from ..utils.sh_utils import RGB2SH, eval_sh
+from ..utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
-from arguments import OptimizationParams
+from ..arguments import OptimizationParams
 from tqdm import tqdm
-from bvh import RayTracer
-from utils.graphics_utils import fibonacci_sphere_sampling
+from ..bvh import RayTracer
 
 
 def sample_incident_rays(normals, is_training=False, sample_num=24):

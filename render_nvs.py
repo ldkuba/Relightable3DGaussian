@@ -1,14 +1,12 @@
 import os
 import torch
-from gaussian_renderer import render_fn_dict
-from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
+from .gaussian_renderer import render_fn_dict
+from .scene import Scene, GaussianModel
+from .utils.general_utils import safe_state
 from tqdm import tqdm
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams
-from scene.direct_light_map import DirectLightMap
-
-from arguments import get_combined_args
+from .arguments import ModelParams, PipelineParams, get_combined_args
+from .scene.direct_light_map import DirectLightMap
 
 class GaussianRendererWrapper:
 

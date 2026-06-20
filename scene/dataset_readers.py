@@ -5,16 +5,16 @@ import json
 import numpy as np
 
 from typing import NamedTuple
-from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
+from .colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
     read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
-from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
+from ..utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 from pathlib import Path
 from plyfile import PlyData, PlyElement
-from utils.sh_utils import SH2RGB
-from scene.gaussian_model import BasicPointCloud
+from ..utils.sh_utils import SH2RGB
+from .gaussian_model import BasicPointCloud
 from tqdm import tqdm
 import cv2
-from scene.utils import load_img_rgb, load_mask_bool, load_depth, load_pfm
+from .utils import load_img_rgb, load_mask_bool, load_depth, load_pfm
 
 class CameraInfo(NamedTuple):
     uid: int

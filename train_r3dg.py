@@ -7,23 +7,26 @@ import torchvision
 from collections import defaultdict
 from random import randint
 
+from torchvision.utils import save_image
+
+
 from wrapt import patches
-from utils.loss_utils import ssim
-from gaussian_renderer import render_fn_dict
+from .utils.loss_utils import ssim
+from .gaussian_renderer import render_fn_dict
 import sys
-from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
+from .scene import Scene, GaussianModel
+from .utils.general_utils import safe_state
 from tqdm import tqdm
-from utils.image_utils import psnr, visualize_depth
-from utils.system_utils import prepare_output_and_logger
+from .utils.image_utils import psnr, visualize_depth
+from .utils.system_utils import prepare_output_and_logger
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, OptimizationParams
-from gui import GUI
-from scene.direct_light_map import DirectLightMap
-from utils.graphics_utils import rgb_to_srgb
+from .arguments import ModelParams, PipelineParams, OptimizationParams
+from .gui import GUI
+from .scene.direct_light_map import DirectLightMap
+from .utils.graphics_utils import rgb_to_srgb
 from torchvision.utils import save_image, make_grid
-from lpipsPyTorch import lpips
-from scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
+from .lpipsPyTorch import lpips
+from .scene.utils import save_render_orb, save_depth_orb, save_normal_orb, save_albedo_orb, save_roughness_orb
 
 import wandb
 
@@ -105,12 +108,12 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
             name=args.wandb_name,
             config={
                 "model_type": "r3dg_pbr" if args.is_pbr else "r3dg_init",
-                "dataset": dataset._source_path,
+                "dataset": dataset.source_path,
                 "iterations": opt.iterations,
                 "diff-spsr": args.diff_spsr,
                 "local_smoothing_strength": args.local_smoothing_strength,
                 "depth_consistency_strength": args.depth_consistency_strength,
-                "resolution": dataset._resolution
+                "resolution": dataset.resolution
             },
         )
     else:
@@ -169,10 +172,10 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if args.diff_spsr:
         import sdpsr.sdpsr_approx as sdpsr
         print("Using Diff-SPSR for reconstruction")
-        sdpsr_model = sdpsr.SDPSRApprox(res=(128, 128, 128), sigma_cov=0.003, sampling_density_factor=0.7, compute_laplace=False, compute_point_variance=False)
+        sdpsr_model = sdpsr.SDPSRApprox(res=(256, 256, 256), sigma_cov=0.1, sampling_density_factor=0.7, compute_laplace=False, compute_point_variance=False)
 
         import utils.render_sdf as render_sdf
-        sdf_renderer = render_sdf.SDFRenderer(n_samples=64, n_importance=64, up_sample_steps=4, simple_upsample=True)
+        sdf_renderer = render_sdf.SDFRenderer(n_samples=16, n_importance=4, up_sample_steps=2, simple_upsample=True)
 
         # Save camera stack for debugging
         torch.save(scene.getTrainCameras(), os.path.join(dataset.model_path, "train_cams.pth"))
@@ -260,7 +263,18 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 sdf, variance, sdf_spacing, sdf_corner, _ = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
 
                 # Volumetric SDF rendering
-                depth_sdf, normal_sdf, ray_mask, _ = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
+                depth_sdf, normal_sdf, ray_mask, _ = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False)#, n_sample_rays=1024)
+
+                if iteration % 5_000 == 0:
+                    vis_sdf = vis.VisualizationWriter()
+                    grid_res = torch.tensor(sdpsr_model.res)
+                    vis_sdf.add_scalar_field("sdf", grid_res, sdf_spacing, sdf_corner, sdf, use_colors=True, threshold=0.00001)
+                    vis_sdf.save("debug_artifacts/sdf/sdf_iter_{}.pt".format(iteration))
+
+                    # Save depth image
+                    depth_image = depth_sdf / depth_sdf.max()
+                    save_image(depth_image, "debug_artifacts/sdf/depth_iter_{}.png".format(iteration))
+
                 depth_sdf = depth_sdf[ray_mask].unsqueeze(-1)
                 normal_sdf = normal_sdf[ray_mask]
                 normal_sdf = normal_sdf / (torch.norm(normal_sdf, dim=-1, keepdim=True) + 1e-6)
@@ -415,13 +429,13 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 if interpolated_depths.shape[0] > 0:
                     depth_consistency_se = (interpolated_depths - cache_depths) ** 2
 
-                    if iteration == 5000:
-                        vis_cache_points = vis.VisualizationWriter()
-                        vis_cache_points.add_point_cloud("cache points", cache_points, values_tensor=depth_gradient_variance[y0, x0])
-                        vis_cache_points.add_point_cloud("depth loss", cache_points, values_tensor=depth_consistency_se)
-                        vis_cache_points.add_point_cloud("camera", viewpoint_cam_pos.unsqueeze(0), arrows=camera_primary_ray.unsqueeze(0))
-                        vis_cache_points.add_point_cloud("og_camera", cache_hit.view_point.unsqueeze(0), arrows=cache_hit.view_dir.unsqueeze(0))
-                        vis_cache_points.save("debug_artifacts/depth_consistency/cache_points_1_iter.pt")
+                    # if iteration == 5000:
+                    #     vis_cache_points = vis.VisualizationWriter()
+                    #     vis_cache_points.add_point_cloud("cache points", cache_points, values_tensor=depth_gradient_variance[y0, x0])
+                    #     vis_cache_points.add_point_cloud("depth loss", cache_points, values_tensor=depth_consistency_se)
+                    #     vis_cache_points.add_point_cloud("camera", viewpoint_cam_pos.unsqueeze(0), arrows=camera_primary_ray.unsqueeze(0))
+                    #     vis_cache_points.add_point_cloud("og_camera", cache_hit.view_point.unsqueeze(0), arrows=cache_hit.view_dir.unsqueeze(0))
+                    #     vis_cache_points.save("debug_artifacts/depth_consistency/cache_points_1_iter.pt")
 
                     print("Max loss:", depth_consistency_se.max().item(), "Mean loss:", depth_consistency_se.mean().item(), "Num points:", depth_consistency_se.shape[0])
 

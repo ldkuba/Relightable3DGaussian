@@ -3,7 +3,7 @@ import re
 import pyexr
 import numpy as np
 import imageio as imageio
-from utils.graphics_utils import srgb_to_rgb, rgb_to_srgb
+from ..utils.graphics_utils import srgb_to_rgb, rgb_to_srgb
 
 def load_pfm(file: str):
     color = None

@@ -8,15 +8,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision
-from gaussian_renderer import render_fn_dict
-from scene import GaussianModel
-from utils.general_utils import safe_state
-from utils.camera_utils import Camera, JSON_to_camera
+from .gaussian_renderer import render_fn_dict
+from .scene import GaussianModel
+from .utils.general_utils import safe_state
+from .utils.camera_utils import Camera, JSON_to_camera
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams
-from utils.system_utils import searchForMaxIteration
-from scene.direct_light_map import DirectLightMap
-from utils.graphics_utils import focal2fov, rgb_to_srgb
+from .arguments import ModelParams, PipelineParams
+from .utils.system_utils import searchForMaxIteration
+from .scene.direct_light_map import DirectLightMap
+from .utils.graphics_utils import focal2fov, rgb_to_srgb
 
 
 def safe_normalize(x, eps=1e-20):

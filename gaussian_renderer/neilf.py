@@ -2,13 +2,13 @@ import math
 import torch
 import numpy as np
 import torch.nn.functional as F
-from arguments import OptimizationParams
-from scene.gaussian_model import GaussianModel
-from scene.cameras import Camera
-from utils.sh_utils import eval_sh
-from utils.loss_utils import ssim, bilateral_smooth_loss, second_order_edge_aware_loss, tv_loss, first_order_edge_aware_loss, first_order_loss, first_order_edge_aware_norm_loss
-from utils.image_utils import psnr
-from utils.graphics_utils import fibonacci_sphere_sampling, rgb_to_srgb, srgb_to_rgb
+from ..arguments import OptimizationParams
+from ..scene.gaussian_model import GaussianModel
+from ..scene.cameras import Camera
+from ..utils.sh_utils import eval_sh
+from ..utils.loss_utils import ssim, bilateral_smooth_loss, second_order_edge_aware_loss, tv_loss, first_order_edge_aware_loss, first_order_loss, first_order_edge_aware_norm_loss
+from ..utils.image_utils import psnr
+from ..utils.graphics_utils import fibonacci_sphere_sampling, rgb_to_srgb, srgb_to_rgb
 from .r3dg_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
 
