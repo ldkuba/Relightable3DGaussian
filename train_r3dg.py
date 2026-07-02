@@ -111,6 +111,9 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 "dataset": dataset.source_path,
                 "iterations": opt.iterations,
                 "diff-spsr": args.diff_spsr,
+                "diff-spsr-grid-res": args.diff_spsr_grid_res,
+                "lambda-vol-depth-render": args.lambda_vol_depth_render,
+                "lambda-vol-normal-render": args.lambda_vol_normal_render,
                 "local_smoothing_strength": args.local_smoothing_strength,
                 "depth_consistency_strength": args.depth_consistency_strength,
                 "resolution": dataset.resolution
@@ -172,7 +175,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if args.diff_spsr:
         import sdpsr.sdpsr_approx as sdpsr
         print("Using Diff-SPSR for reconstruction")
-        sdpsr_model = sdpsr.SDPSRApprox(res=(256, 256, 256), sigma_cov=0.1, sampling_density_factor=0.7, compute_laplace=False, compute_point_variance=False)
+        sdpsr_model = sdpsr.SDPSRApprox(res=(args.diff_spsr_grid_res, args.diff_spsr_grid_res, args.diff_spsr_grid_res), sigma_cov=0.1, sampling_density_factor=0.7, compute_laplace=False, compute_point_variance=True)
 
         import utils.render_sdf as render_sdf
         sdf_renderer = render_sdf.SDFRenderer(n_samples=16, n_importance=4, up_sample_steps=2, simple_upsample=True)
@@ -258,22 +261,23 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         # Diff-SPSR
         if args.diff_spsr:
-            if iteration > args.diff_spsr_start_iteration:
+            if iteration > args.diff_spsr_start_iteration and iteration % args.diff_spsr_interval == 0:
                 # SDPSR
-                sdf, variance, sdf_spacing, sdf_corner, _ = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
+                sdf, _, sdf_spacing, sdf_corner, extra_rets = sdpsr_model(gaussians.get_xyz, gaussians.get_normal)
+                point_variance = extra_rets["point_variance"]
 
                 # Volumetric SDF rendering
-                depth_sdf, normal_sdf, ray_mask, _ = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False)#, n_sample_rays=1024)
+                depth_sdf, normal_sdf, ray_mask, _ = sdf_renderer.render(sdf, sdf_corner, sdf_spacing, viewpoint_cam, volumetric=False, n_sample_rays=1024)
 
-                if iteration % 5_000 == 0:
-                    vis_sdf = vis.VisualizationWriter()
-                    grid_res = torch.tensor(sdpsr_model.res)
-                    vis_sdf.add_scalar_field("sdf", grid_res, sdf_spacing, sdf_corner, sdf, use_colors=True, threshold=0.00001)
-                    vis_sdf.save("debug_artifacts/sdf/sdf_iter_{}.pt".format(iteration))
+                # if iteration % 5_000 == 0:
+                #     vis_sdf = vis.VisualizationWriter()
+                #     grid_res = torch.tensor(sdpsr_model.res)
+                #     vis_sdf.add_scalar_field("sdf", grid_res, sdf_spacing, sdf_corner, sdf, use_colors=True, threshold=0.00001)
+                #     vis_sdf.save("debug_artifacts/sdf/sdf_iter_{}.pt".format(iteration))
 
-                    # Save depth image
-                    depth_image = depth_sdf / depth_sdf.max()
-                    save_image(depth_image, "debug_artifacts/sdf/depth_iter_{}.png".format(iteration))
+                #     # Save depth image
+                #     depth_image = depth_sdf / depth_sdf.max()
+                #     save_image(depth_image, "debug_artifacts/sdf/depth_iter_{}.png".format(iteration))
 
                 depth_sdf = depth_sdf[ray_mask].unsqueeze(-1)
                 normal_sdf = normal_sdf[ray_mask]
@@ -286,11 +290,11 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
                 normal_dot = (normal_sdf * selected_normal_gaussian).sum(dim=-1)
 
-                loss_depth = F.mse_loss(depth_sdf, selected_depth_gaussian, reduction='sum')
-                loss_normal = F.l1_loss(normal_sdf, selected_normal_gaussian, reduction='sum') + F.l1_loss(torch.ones_like(normal_dot), normal_dot, reduction='sum')
+                loss_depth = F.mse_loss(depth_sdf, selected_depth_gaussian)
+                loss_normal = F.l1_loss(normal_sdf, selected_normal_gaussian) + F.l1_loss(torch.ones_like(normal_dot), normal_dot)
 
-                loss += loss_depth * opt.lambda_vol_depth_render
-                loss += loss_normal * opt.lambda_vol_normal_render
+                loss += loss_depth * args.lambda_vol_depth_render
+                loss += loss_normal * args.lambda_vol_normal_render
 
         # Common things for local smoothing and depth consistency
         if (args.local_smoothing_strength > 0 and iteration > args.local_smoothing_start_iter) or \
@@ -315,8 +319,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
             # Calculate depth gradient variance
             depth_grad = torch.cat(torch.gradient(depth_gaussians, dim=(-2, -1), edge_order=1), dim=0)
-            # depth_grad_variance = filter_variance(depth_grad, args.local_smoothing_patch_size)
-            depth_grad_variance = torch.ones_like(depth_gaussians).squeeze(0)
+            depth_grad_variance = filter_variance(depth_grad, args.local_smoothing_patch_size)
+            # depth_grad_variance = torch.ones_like(depth_gaussians).squeeze(0)
 
             # Filter if max-min depth in a patch is too high
             depth_patches = F.unfold(depth_gaussians.unsqueeze(0), kernel_size=args.local_smoothing_patch_size, padding=args.local_smoothing_patch_size//2).view(args.local_smoothing_patch_size**2, depth_gaussians.shape[0], depth_gaussians.shape[1], depth_gaussians.shape[2])
@@ -503,6 +507,12 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 "psnr": tb_dict["psnr"]
             }, step=iteration)
 
+            if args.diff_spsr and iteration > args.diff_spsr_start_iteration and iteration % args.diff_spsr_interval == 0:
+                wandb_run.log({
+                    "loss_depth_sdf": loss_depth.item(),
+                    "loss_normal_sdf": loss_normal.item(),
+                }, step=iteration)
+
             if args.local_smoothing_strength > 0 and iteration > args.local_smoothing_start_iter:
                 pass
                 wandb_run.log({
@@ -537,10 +547,19 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                             bg_color=background, dict_params=pbr_kwargs)
 
             # densification
-            # TODO: Use variance to influence densification
             if iteration < opt.densify_until_iter:
+                grad_scaling = None
+                if args.diff_spsr and not args.diff_spsr_no_densify and iteration > args.diff_spsr_start_iteration and iteration % args.diff_spsr_interval == 0:
+                    grad_scaling = point_variance
+                    grad_scaling[grad_scaling < 100.0] = grad_scaling.min() # Cap to only increase gradient for very high variance points
+                    grad_scaling = (grad_scaling - grad_scaling.min()) / (grad_scaling.max() - grad_scaling.min())
+                    grad_scaling *= args.diff_spsr_point_variance_grad_scaling
+                    grad_scaling += 1.0
+                    grad_scaling = grad_scaling.unsqueeze(-1)
+
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, 
-                                                    render_pkg['weights'])
+                                                    render_pkg['weights'], grad_scaling)
+
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
                                                                         radii[visibility_filter])
@@ -787,7 +806,13 @@ def main(args):
 
     # Diff PSR args
     parser.add_argument("--diff-spsr", action='store_true', default=False, help='use diff-spsr for reconstruction')
+    parser.add_argument("--diff-spsr-grid-res", type=int, default=256, help='grid resolution for diff-spsr')
+    parser.add_argument("--lambda-vol-depth-render", type=float, default=0.0, help='weight for depth loss from diff-spsr')
+    parser.add_argument("--lambda-vol-normal-render", type=float, default=0.0, help='weight for normal loss from diff-spsr')
     parser.add_argument("--diff-spsr-start-iteration", type=int, default=4000, help='iteration to start applying diff-spsr loss')
+    parser.add_argument("--diff-spsr-interval", type=int, default=10, help='interval for applying diff-spsr loss')
+    parser.add_argument("--diff-spsr-no-densify", action='store_true', default=True, help='disable densification using diff-spsr point variance')
+    parser.add_argument("--diff-spsr-point-variance-grad-scaling", type=float, default=10.0, help='scaling = [1.0 - scaling] for affecting densification with point variance')
 
     # Common
     parser.add_argument("--color-variance-threshold", type=float, default=0.005, help='threshold for color variance to apply local smoothing')
