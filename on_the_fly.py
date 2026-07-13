@@ -25,6 +25,15 @@ class GaussianBatch(NamedTuple):
     shs_dc: torch.Tensor
     shs_rest: torch.Tensor
 
+
+def save_gaussian_batch(path, gaussian_batch: GaussianBatch):
+    torch.save(gaussian_batch._asdict(), path)
+
+
+def load_gaussian_batch(path) -> GaussianBatch:
+    data = torch.load(path, weights_only=False)
+    return GaussianBatch(**data)
+
 class OnTheFly:
 
     def __init__(self, width, height, max_sh_degree, otfp: OnTheFlyParams, dataset, args,

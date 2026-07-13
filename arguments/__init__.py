@@ -92,6 +92,7 @@ class OnTheFlyParams(ParamGroup):
         self.feature_min_coverage = 0.05
         self.feature_gate_mode = "multiply" # 'multiply' or 'hard'
         self.apply_penalty_map = False
+        self.position_lr_scale_factor = 0.05
         super().__init__(parser, "On The Fly Parameters")
 
 class EvalParams(ParamGroup):

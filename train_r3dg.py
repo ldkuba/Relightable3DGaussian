@@ -24,7 +24,7 @@ from scene.direct_light_map import DirectLightMap
 from utils.graphics_utils import rgb_to_srgb
 from torchvision.utils import save_image, make_grid
 from lpipsPyTorch import lpips
-from on_the_fly import OnTheFly
+from on_the_fly import OnTheFly, save_gaussian_batch, load_gaussian_batch
 
 import time
 
@@ -82,6 +82,7 @@ def filter_depth_consistency(rgb_gaussians, depth_gaussians, normal_gaussians, a
 def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, on_the_fly_args: OnTheFlyParams, evaluation_args: EvalParams):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
+    init_dump_path = os.path.join(dataset.model_path, "init_gaussians.pth")
 
     """
     Setup Gaussians
@@ -91,6 +92,16 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     if args.checkpoint:
         print("Create Gaussians from checkpoint {}".format(args.checkpoint))
         first_iter = gaussians.create_from_ckpt(args.checkpoint, restore_optimizer=True)
+
+    elif args.load_init_dump:
+        if not os.path.exists(init_dump_path):
+            raise FileNotFoundError(f"Initial gaussian dump not found: {init_dump_path}")
+        print(f"Loading initial gaussian dump from {init_dump_path}")
+        gaussian_batch = load_gaussian_batch(init_dump_path)
+        gaussians.create_from_gaussian_batch(
+            gaussian_batch,
+            scene.cameras_extent * on_the_fly_args.position_lr_scale_factor,
+        )
 
     elif scene.loaded_iter and not pipe.on_the_fly:
         gaussians.load_ply(os.path.join(dataset.model_path,
@@ -122,13 +133,23 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         merged_batch = on_the_fly_obj.merge_gaussian_batches()
         if merged_batch is not None:
-            gaussians.create_from_gaussian_batch(merged_batch, scene.cameras_extent * 0.05)
+            gaussians.create_from_gaussian_batch(
+                merged_batch,
+                scene.cameras_extent * on_the_fly_args.position_lr_scale_factor,
+            )
 
         del on_the_fly_obj
         torch.cuda.empty_cache()
 
     else:
         gaussians.create_from_pcd(scene.scene_info.point_cloud, scene.cameras_extent)
+
+    if args.dump_init and pipe.on_the_fly:
+        print("[dump-init] Saving initially spawned gaussians and exiting.")
+        scene.save(0)
+        if merged_batch is not None:
+            save_gaussian_batch(init_dump_path, merged_batch)
+        return gaussians
 
     gaussians.training_setup(opt)
     if pipe.on_the_fly:
@@ -743,6 +764,10 @@ def main(args):
     parser.add_argument("--depth-consistency-patch-size", type=int, default=3, help='patch size for rejecting points for depth consistency')
     parser.add_argument("--depth-consistency-depth-threshold", type=float, default=0.01, help='depth delta threshold for rejecting points for depth consistency')
     parser.add_argument("--depth-consistency-view-angle-threshold", type=float, default=30.0, help='angle threshold (in degrees) for considering points for depth consistency based on their original view direction and current view direction')
+
+    # misc
+    parser.add_argument("--dump-init", action="store_true")
+    parser.add_argument("--load-init-dump", action="store_true")
 
     args = parser.parse_args(args)
     print(f"Current model path: {args.model_path}")
