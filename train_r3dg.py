@@ -97,10 +97,42 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                                         "point_cloud",
                                         "iteration_" + str(scene.loaded_iter),
                                         "point_cloud.ply"))
-    elif not pipe.on_the_fly:
+    elif pipe.on_the_fly:
+        tmp = scene.getTrainCameras()[0]
+        on_the_fly_render_fn = render_fn_dict["render"]
+        on_the_fly_obj = OnTheFly(width=tmp.image_width, height=tmp.image_height, max_sh_degree=dataset.sh_degree,
+                                  otfp=on_the_fly_args, dataset=dataset, args=args, render_fn=on_the_fly_render_fn,
+                                  pipe=pipe, opt=opt, scene_info=scene.scene_info)
+
+        on_the_fly_obj.init_neighbourhood(scene.getTrainCameras())
+
+        print("##### RUN ON THE FLY GAUSSIAN SPAWNING #####")
+        viewpoint_stack_on_the_fly = scene.getTrainCameras().copy()
+        initial_progb = tqdm(range(0, len(scene.getTrainCameras())), desc="Initial gaussian spawning",
+                             initial=0, total=len(scene.getTrainCameras()))
+        spawned_gaussians = 0
+
+        for iter in initial_progb:
+            viewpoint_cam = viewpoint_stack_on_the_fly.pop()
+            if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
+                gaussian_batch = on_the_fly_obj.add_gaussians(viewpoint_cam)
+                if gaussian_batch is not None:
+                    spawned_gaussians += gaussian_batch.means.shape[0]
+            print(f"gaussians spawned so far: {spawned_gaussians}")
+
+        merged_batch = on_the_fly_obj.merge_gaussian_batches()
+        if merged_batch is not None:
+            gaussians.create_from_gaussian_batch(merged_batch, scene.cameras_extent * 0.05)
+
+        del on_the_fly_obj
+        torch.cuda.empty_cache()
+
+    else:
         gaussians.create_from_pcd(scene.scene_info.point_cloud, scene.cameras_extent)
 
     gaussians.training_setup(opt)
+    if pipe.on_the_fly:
+        gaussians.weights_accum[:] = 1.0
 
     """
     Setup PBR components
@@ -131,14 +163,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     render_fn = render_fn_dict[args.type]
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-
-    if pipe.on_the_fly:
-        tmp = scene.getTrainCameras()[0]
-        on_the_fly_obj = OnTheFly(width=tmp.image_width, height=tmp.image_height, max_sh_degree=dataset.sh_degree,
-                                  otfp=on_the_fly_args, dataset=dataset, args=args, scene_info=scene.scene_info,
-                                  render_fn=render_fn, pipe=pipe, pbr_kwargs=pbr_kwargs, opt=opt)
-
-        on_the_fly_obj.init_neighbourhood(scene.getTrainCameras())
 
     eval_man = EvalManager(ep=evaluation_args, args=args, enabled=pipe.eval_wandb, name=pipe.wandb_name)
     """ Prepare Diff-SPSR if enabled """
@@ -184,22 +208,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                         initial=first_iter, total=opt.iterations)
 
     torch.autograd.set_detect_anomaly(True)
-
-    initial_progb = tqdm(range(0, len(scene.getTrainCameras())), desc="Initial gaussian spawning",
-                         initial=0, total=len(scene.getTrainCameras()))
-
-    if pipe.on_the_fly:
-        print("##### RUN ON THE FLY GAUSSIAN SPAWNING #####")
-        viewpoint_stack_on_the_fly = scene.getTrainCameras().copy()
-        for iter in initial_progb:
-            viewpoint_cam = viewpoint_stack_on_the_fly.pop()
-            if pipe.on_the_fly and on_the_fly_obj.check_and_set_cam(viewpoint_cam.uid):
-                on_the_fly_obj.add_gaussians(gaussians, viewpoint_cam)
-            print(f"gaussians spawned so far: {gaussians.get_xyz.shape[0]}")
-
-    if pipe.on_the_fly:
-        del on_the_fly_obj
-        torch.cuda.empty_cache()
 
     for iteration in progress_bar:
         gaussians.update_learning_rate(iteration)
@@ -475,8 +483,18 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     densify_grad_normal_threshold = opt.densify_grad_normal_threshold if iteration > opt.normal_densify_from_iter else 99999
+                    # DEBUG: Temporary prune diagnostics for bulk-loaded on-the-fly gaussians.
+                    pre_prune_points = gaussians.get_xyz.shape[0]
+                    pre_prune_weight_mask = (gaussians.weights_accum[:, 0] < 1e-4).sum().item()
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold,
                                                 densify_grad_normal_threshold)
+                    print(
+                        "[train_r3dg DEBUG]"
+                        f" iter={iteration}"
+                        f" pre_prune_points={pre_prune_points}"
+                        f" pre_prune_low_weight={pre_prune_weight_mask}"
+                        f" post_prune_points={gaussians.get_xyz.shape[0]}"
+                    )
 
                 if iteration % opt.opacity_reset_interval == 0 or (
                         dataset.white_background and iteration == opt.densify_from_iter):

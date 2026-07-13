@@ -455,6 +455,32 @@ class GaussianModel:
             self._visibility_dc = nn.Parameter(visibility[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
             self._visibility_rest = nn.Parameter(visibility[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
 
+    def create_from_gaussian_batch(self, gaussian_batch, spatial_lr_scale: float):
+        self.spatial_lr_scale = spatial_lr_scale
+        self._xyz = nn.Parameter(gaussian_batch.means.requires_grad_(True))
+        self._normal = nn.Parameter(gaussian_batch.normals.requires_grad_(True))
+        self._rotation = nn.Parameter(gaussian_batch.rotations.requires_grad_(True))
+        self._scaling = nn.Parameter(gaussian_batch.scales.requires_grad_(True))
+        self._opacity = nn.Parameter(gaussian_batch.opacities.requires_grad_(True))
+        self._shs_dc = nn.Parameter(gaussian_batch.shs_dc.contiguous().requires_grad_(True))
+        self._shs_rest = nn.Parameter(gaussian_batch.shs_rest.contiguous().requires_grad_(True))
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+        if self.use_pbr:
+            base_color = torch.zeros_like(self._xyz)
+            roughness = torch.zeros((self._xyz.shape[0], 1), dtype=torch.float, device="cuda")
+
+            self._base_color = nn.Parameter(base_color.requires_grad_(True))
+            self._roughness = nn.Parameter(roughness.requires_grad_(True))
+
+            incidents = torch.zeros((self._xyz.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+            self._incidents_dc = nn.Parameter(incidents[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
+            self._incidents_rest = nn.Parameter(incidents[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
+
+            visibility = torch.zeros((self._xyz.shape[0], 1, 4 ** 2)).float().cuda()
+            self._visibility_dc = nn.Parameter(visibility[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
+            self._visibility_rest = nn.Parameter(visibility[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
+
     def training_setup(self, training_args: OptimizationParams):
         self.percent_dense = training_args.percent_dense
         self.weights_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")

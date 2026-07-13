@@ -1,6 +1,6 @@
 import os
 import math
-from typing import NamedTuple
+from typing import Dict, List, NamedTuple, Optional
 
 import numpy as np
 import torch
@@ -28,7 +28,7 @@ class GaussianBatch(NamedTuple):
 class OnTheFly:
 
     def __init__(self, width, height, max_sh_degree, otfp: OnTheFlyParams, dataset, args,
-                 render_fn, pipe, opt, pbr_kwargs, scene_info = None, bg = 0.0):
+                 render_fn, pipe, opt, scene_info = None, bg = 0.0):
 
         # set device
         self.DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -55,7 +55,6 @@ class OnTheFly:
         self.args = args
         self.pipe = pipe
         self.opt = opt
-        self.pbr_kwargs = pbr_kwargs
 
         self.width = width
         self.height = height
@@ -78,7 +77,8 @@ class OnTheFly:
         self.to_save_tmp = np.zeros((0, 3))
         self.colmap_to_save_tmp = np.zeros((0, 3))
 
-        self.gaussian_batches = dict()
+        self.spawned_batches: List[GaussianBatch] = []
+        self.gaussian_batches: Dict[str, GaussianBatch] = {}
 
         self.render_fn = render_fn
 
@@ -104,7 +104,6 @@ class OnTheFly:
 
     def generate_mask(self, img):
         return img != self.bg
-
 
     @torch.no_grad()
     def generate_gaussians(self, depth_mask, prob_mask, sample_mask, image_mask, cam):
@@ -183,6 +182,7 @@ class OnTheFly:
             means=world_points, scales=scales, rotations=rots, normals=normals, shs_dc=shs_dc, shs_rest=shs_rest,
             opacities=opacities)
 
+        self.spawned_batches.append(gaussian_batch)
         if self.apply_penalty_map:
             self.gaussian_batches[cam.image_name] = gaussian_batch
 
@@ -202,10 +202,25 @@ class OnTheFly:
         image_D = Image.fromarray(img_D.astype(np.uint8))
         image_D.save(os.path.expanduser(f"~/gaussian-splatting/pcd/depth_maps/{name}_depth_map.png"))
 
-    def add_gaussians(self, gaussians, viewpoint_cam):
+    def merge_gaussian_batches(self) -> Optional[GaussianBatch]:
+        if len(self.spawned_batches) == 0:
+            return None
+        batches = self.spawned_batches
+
+        return GaussianBatch(
+            means=torch.cat([batch.means for batch in batches], dim=0),
+            scales=torch.cat([batch.scales for batch in batches], dim=0),
+            rotations=torch.cat([batch.rotations for batch in batches], dim=0),
+            opacities=torch.cat([batch.opacities for batch in batches], dim=0),
+            normals=torch.cat([batch.normals for batch in batches], dim=0),
+            shs_dc=torch.cat([batch.shs_dc for batch in batches], dim=0),
+            shs_rest=torch.cat([batch.shs_rest for batch in batches], dim=0),
+        )
+
+    def add_gaussians(self, viewpoint_cam):
         key_points = self.key_points_torch.get(f"{viewpoint_cam.image_name}.png")
         if key_points is None or key_points[0].numel() < self.feature_threshold:
-            return
+            return None
 
         # generate masks
         depth_mask = self.depth_estimator.generate_depth_map(viewpoint_cam)
@@ -222,7 +237,7 @@ class OnTheFly:
             image_mask=image_mask,
             cam=viewpoint_cam)
 
-        gaussians.add_on_the_fly_gaussians(gaussian_batch)
+        return gaussian_batch
 
     def save(self):
         print("[on_the_fly] save means of generated gaussians - self.to_save_tmp.shape: ", self.to_save_tmp.shape)
@@ -245,7 +260,7 @@ class OnTheFly:
             return torch.zeros(viewpoint_cam.original_image.shape)
 
         render_pkg = self.render_fn(viewpoint_cam, gaussian_model, self.pipe, torch.tensor(self.bg, dtype=torch.float32, device="cuda"),
-                               opt=self.opt, is_training=False, dict_params=self.pbr_kwargs, iteration=-1)
+                               opt=self.opt, is_training=False, iteration=-1)
 
         return render_pkg["render"]
 
@@ -263,7 +278,6 @@ class OnTheFly:
             torch.tensor(self.bg, dtype=torch.float32, device="cuda"),
             opt=self.opt,
             is_training=False,
-            dict_params=self.pbr_kwargs,
             iteration=-1,
         )
 
@@ -300,6 +314,7 @@ class OnTheFly:
             ]
 
     def free_gpu_mem(self):
+        self.spawned_batches.clear()
         self.gaussian_batches.clear()
         del self.depth_estimator.model
         self.depth_estimator.model = None
