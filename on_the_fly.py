@@ -58,6 +58,10 @@ class OnTheFly:
         self.feature_sigma = otfp.feature_sigma  # blur radius in pixels
         self.feature_min_coverage = otfp.feature_min_coverage
         self.feature_gate_mode = otfp.feature_gate_mode
+        self.position_lr_scale_factor = otfp.position_lr_scale_factor
+        self.adjust_by_median = otfp.adjust_by_median
+        self.adjust_by_scipy_cKDTree = otfp.adjust_by_scipy_cKDTree
+        self.adjust_by_pytorch3d_knn_points = otfp.adjust_by_pytorch3d_knn_points
         # "multiply" or "hard"
 
         self.dataset = dataset
@@ -95,8 +99,6 @@ class OnTheFly:
 
         self.depth_estimator = DepthEstimator(otfp, scene_info, self.p3ids, self.xyzs, self.key_points_torch)
         self.mask_sampler = MaskSampler(otfp, scene_info, width, height, self.key_points_torch)
-
-        print(self.to_string())
 
 
     def _move_key_points_to_device(self, key_points):
@@ -331,12 +333,14 @@ class OnTheFly:
 
     def to_string(self):
         return (
-            f"OnTheFly[device={self.DEVICE}, width={self.width}, height={self.height}, "
-            f"max_sh_degree={self.max_sh_degree}, bg={self.bg}, knn_p={self.knn_p}, knn_n={self.knn_n}, "
-            f"knn_stride={self.knn_stride}, knn_epsilon={self.knn_epsilon}, "
+            "OnTheFly[\n"
+            f"  device={self.DEVICE}, width={self.width}, height={self.height}, "
+            f"max_sh_degree={self.max_sh_degree}, bg={self.bg}, "
             f"error_threshold={self.error_threshold}, feature_threshold={self.feature_threshold}, "
-            f"base_prob={self.base_prob}, normalize_prob={self.normalize_prob}, "
-            f"apply_penalty_map={self.apply_penalty_map}, neighbourhood_angle={self.neighbourhood_angle}, "
-            f"dav2_target_width={self.dav2_target_width}, feature_sigma={self.feature_sigma}, "
-            f"feature_min_coverage={self.feature_min_coverage}, feature_gate_mode={self.feature_gate_mode}]"
+            f"neighbourhood_angle={self.neighbourhood_angle}, "
+            f"position_lr_scale_factor={self.position_lr_scale_factor}, "
+            f"sfm_points={len(self.xyzs)}, keypoint_images={len(self.key_points_torch)}\n"
+            f"  depth_estimator={self.depth_estimator.to_string()}\n"
+            f"  mask_sampler={self.mask_sampler.to_string()}\n"
+            "]"
         )

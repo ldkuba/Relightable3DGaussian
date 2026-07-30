@@ -37,7 +37,6 @@ class MaskSampler:
         self.disc_kernel = self.disc_kernel.cuda() / self.disc_kernel.sum()
 
         self.feature_kernel = self._make_gaussian_kernel().to(self.DEVICE)
-        print(self.to_string())
 
     @torch.no_grad()
     def get_lapla_norm(self, img, kernel):
@@ -176,5 +175,7 @@ class MaskSampler:
             f"base_prob={self.base_prob}, normalize_prob={self.normalize_prob}, "
             f"apply_penalty_map={self.apply_penalty_map}, feature_sigma={self.feature_sigma}, "
             f"truncate={self.truncate}, feature_min_coverage={self.feature_min_coverage}, "
-            f"feature_gate_mode={self.feature_gate_mode}]"
+            f"feature_gate_mode={self.feature_gate_mode}, "
+            f"feature_kernel_size={tuple(self.feature_kernel.shape[-2:])}, "
+            f"keypoint_images={len(self.key_points_torch)}]"
         )

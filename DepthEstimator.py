@@ -75,7 +75,6 @@ class DepthEstimator:
         # Depth-Anything-V2 normalization constants.
         self._dav2_mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32, device=self.DEVICE).view(1, 3, 1, 1)
         self._dav2_std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32, device=self.DEVICE).view(1, 3, 1, 1)
-        print(self.to_string())
 
     def _compute_dav2_size(self, h, w):
         # Match DA-V2 Resize(keep_aspect_ratio=True, ensure_multiple_of=14, resize_method='lower_bound').
@@ -285,5 +284,6 @@ class DepthEstimator:
             f"knn_stride={self.knn_stride}, knn_epsilon={self.knn_epsilon}, "
             f"dav2_target_width={self.dav2_target_width}, adjust_by_median={self.adjust_by_median}, "
             f"adjust_by_scipy_cKDTree={self.adjust_by_scipy_cKDTree}, "
-            f"adjust_by_pytorch3d_knn_points={self.adjust_by_pytorch3d_knn_points}]"
+            f"adjust_by_pytorch3d_knn_points={self.adjust_by_pytorch3d_knn_points}, "
+            f"sfm_points={len(self.xyzs)}, keypoint_images={len(self.key_points)}]"
         )
