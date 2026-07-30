@@ -114,6 +114,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         on_the_fly_obj = OnTheFly(width=tmp.image_width, height=tmp.image_height, max_sh_degree=dataset.sh_degree,
                                   otfp=on_the_fly_args, dataset=dataset, args=args, render_fn=on_the_fly_render_fn,
                                   pipe=pipe, opt=opt, scene_info=scene.scene_info)
+        print(on_the_fly_obj.to_string())
 
         on_the_fly_obj.init_neighbourhood(scene.getTrainCameras())
 
@@ -504,18 +505,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     densify_grad_normal_threshold = opt.densify_grad_normal_threshold if iteration > opt.normal_densify_from_iter else 99999
-                    # DEBUG: Temporary prune diagnostics for bulk-loaded on-the-fly gaussians.
-                    pre_prune_points = gaussians.get_xyz.shape[0]
-                    pre_prune_weight_mask = (gaussians.weights_accum[:, 0] < 1e-4).sum().item()
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold,
                                                 densify_grad_normal_threshold)
-                    print(
-                        "[train_r3dg DEBUG]"
-                        f" iter={iteration}"
-                        f" pre_prune_points={pre_prune_points}"
-                        f" pre_prune_low_weight={pre_prune_weight_mask}"
-                        f" post_prune_points={gaussians.get_xyz.shape[0]}"
-                    )
 
                 if iteration % opt.opacity_reset_interval == 0 or (
                         dataset.white_background and iteration == opt.densify_from_iter):
