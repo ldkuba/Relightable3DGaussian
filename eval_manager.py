@@ -1,5 +1,8 @@
 import torch
 import wandb
+import json
+import os
+from pathlib import Path
 
 from arguments import EvalParams
 from utils.image_utils import psnr
@@ -11,8 +14,12 @@ class EvalManager:
         self.args = args
         self.enabled = enabled
         self.wandb_run = None
+        local_log_path = os.environ.get("R3DG_EVAL_LOG_PATH")
+        self.local_log_path = Path(local_log_path) if local_log_path else None
+        if self.local_log_path is not None:
+            self.local_log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if self.enabled:
+        if self.enabled and self.local_log_path is None:
             self.wandb_run = wandb.init(
                 entity="ldkuba-tu-wien",
                 project="GS-Reconstruction-Acceleration",
@@ -20,16 +27,22 @@ class EvalManager:
             )
 
     def log(self, iteration, scene, gaussians, render_fn, pipe, background, opt=None, pbr_kwargs=None):
-        """Render every train view, compute PSNR stats, and upload them to wandb."""
-        if not self.enabled or self.wandb_run is None:
+        """Render every train view, compute PSNR stats, and upload tdhem to wandb."""
+        if not self.enabled and self.local_log_path is None:
             return None
 
-        if iteration % 10 != 0:
+        if iteration <= 10_000 and iteration % 20 != 0:
+            return None
+        elif iteration > 10_000 and iteration % 500 != 0:
             return None
 
-        test_cameras = scene.getTestCameras()
-        if not test_cameras:
-            print(f"[ITER {iteration}] EvalManager: no train cameras available, skipping wandb eval log.")
+        eval_cameras = scene.getTestCameras()
+        split_name = "test"
+        if not eval_cameras:
+            eval_cameras = scene.getTrainCameras()
+            split_name = "train"
+        if not eval_cameras:
+            print(f"[ITER {iteration}] EvalManager: no cameras available, skipping eval log.")
             return None
 
         psnr_values = []
@@ -37,7 +50,7 @@ class EvalManager:
         render_kwargs["iteration"] = iteration
 
         with torch.no_grad():
-            for viewpoint in test_cameras:
+            for viewpoint in eval_cameras:
                 render_pkg = render_fn(
                     viewpoint,
                     gaussians,
@@ -66,9 +79,13 @@ class EvalManager:
             "iteration": int(iteration),
         }
 
-        wandb.log(metrics, step=int(iteration))
+        if self.local_log_path is not None:
+            with self.local_log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(metrics) + "\n")
+        elif self.wandb_run is not None:
+            wandb.log(metrics, step=int(iteration))
         print(
-            f"[ITER {iteration}] EvalManager train PSNR: "
+            f"[ITER {iteration}] EvalManager {split_name} PSNR: "
             f"min {metrics['lowest_psnr']:.4f} "
             f"avg {metrics['average_psnr']:.4f} "
             f"max {metrics['highest_psnr']:.4f}"
