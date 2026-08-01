@@ -28,6 +28,11 @@ from on_the_fly import OnTheFly, save_gaussian_batch, load_gaussian_batch
 
 import time
 
+
+def sync_cuda_timing():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
 def process_gaussian_images(gaussian_renders, opacity_threshold=0.95, depth_variance_quantile_threshold=0.75, hit_mask=False, output_names=[]):
 
     combined_mask = torch.ones((gaussian_renders['render'].shape[1], gaussian_renders['render'].shape[2]), dtype=torch.bool, device=gaussian_renders['render'].device)
@@ -83,6 +88,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     init_dump_path = os.path.join(dataset.model_path, "init_gaussians.pth")
+    initialization_time_sec = 0.0
 
     """
     Setup Gaussians
@@ -109,6 +115,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                                         "iteration_" + str(scene.loaded_iter),
                                         "point_cloud.ply"))
     elif pipe.on_the_fly:
+        sync_cuda_timing()
+        initialization_started_at = time.perf_counter()
         tmp = scene.getTrainCameras()[0]
         on_the_fly_render_fn = render_fn_dict["render"]
         on_the_fly_obj = OnTheFly(width=tmp.image_width, height=tmp.image_height, max_sh_degree=dataset.sh_degree,
@@ -141,6 +149,9 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         del on_the_fly_obj
         torch.cuda.empty_cache()
+        sync_cuda_timing()
+        initialization_time_sec = time.perf_counter() - initialization_started_at
+        print(f"[timing] On-the-fly initialization took {initialization_time_sec:.3f}s")
 
     else:
         gaussians.create_from_pcd(scene.scene_info.point_cloud, scene.cameras_extent)
@@ -187,6 +198,8 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     eval_man = EvalManager(ep=evaluation_args, args=args, enabled=pipe.eval_wandb, name=pipe.wandb_name)
+    eval_man.set_initialization_time(initialization_time_sec)
+    eval_man.track_time()
     """ Prepare Diff-SPSR if enabled """
     if args.diff_spsr:
         import sdpsr.sdpsr_approx as sdpsr
