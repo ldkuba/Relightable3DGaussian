@@ -106,6 +106,13 @@ class EvalParams(ParamGroup):
         self.eval_checkpoint = ""
         self.eval_git_commit = ""
         self.eval_save_pic_x_iter = -1
+        self.psnr = False
+        self.ssim = False
+        self.lpips = False
+        self.gaussians_count = False
+        self.time = False
+        self.step_0 = 20
+        self.step_1 = 500
         super().__init__(parser, "Evaluation Parameters")
 
 
