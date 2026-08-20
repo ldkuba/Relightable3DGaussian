@@ -7,6 +7,8 @@ from pathlib import Path
 
 from arguments import EvalParams
 from utils.image_utils import psnr
+from utils.loss_utils import ssim
+from lpipsPyTorch import lpips
 
 
 class EvalManager:
@@ -41,7 +43,7 @@ class EvalManager:
         self.training_time_sec += time.perf_counter() - self._tracked_since
         self._tracked_since = None
 
-    def set_initialization_time(self, initialization_time_sec: float):
+    def set_initialization_time(self, initialization_time_sec: float, num_gaussians: int | None = None):
         self.initialization_time_sec = initialization_time_sec
         if self._initialization_logged:
             return
@@ -53,6 +55,8 @@ class EvalManager:
             "training_time_sec": self.training_time_sec,
             "cumulative_time_sec": self.initialization_time_sec + self.training_time_sec,
         }
+        if num_gaussians is not None:
+            payload["num_gaussians"] = int(num_gaussians)
         self._write_log(payload, step=0)
 
     def _write_log(self, payload: dict, step: int):
@@ -82,6 +86,8 @@ class EvalManager:
             return None
 
         psnr_values = []
+        ssim_values = []
+        lpips_values = []
         render_kwargs = dict(pbr_kwargs or {})
         render_kwargs["iteration"] = iteration
 
@@ -108,25 +114,43 @@ class EvalManager:
                     image = torch.clamp(image, 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to(image.device), 0.0, 1.0)
                     psnr_values.append(psnr(image, gt_image).mean().detach().double().cpu())
+                    ssim_values.append(ssim(image, gt_image).mean().detach().double().cpu())
+                    lpips_values.append(lpips(image, gt_image, net_type='vgg').mean().detach().double().cpu())
         finally:
             self.track_time()
 
         psnr_values = torch.stack(psnr_values)
+        ssim_values = torch.stack(ssim_values)
+        lpips_values = torch.stack(lpips_values)
         metrics = {
             "lowest_psnr": psnr_values.min().item(),
             "highest_psnr": psnr_values.max().item(),
             "average_psnr": psnr_values.mean().item(),
+            "lowest_ssim": ssim_values.min().item(),
+            "highest_ssim": ssim_values.max().item(),
+            "average_ssim": ssim_values.mean().item(),
+            "lowest_lpips": lpips_values.min().item(),
+            "highest_lpips": lpips_values.max().item(),
+            "average_lpips": lpips_values.mean().item(),
             "iteration": int(iteration),
+            "num_gaussians": int(gaussians.get_xyz.shape[0]),
             "training_time_sec": self.training_time_sec,
             "cumulative_time_sec": self.initialization_time_sec + self.training_time_sec,
         }
 
         self._write_log(metrics, step=int(iteration))
         print(
-            f"[ITER {iteration}] EvalManager {split_name} PSNR: "
-            f"min {metrics['lowest_psnr']:.4f} "
+            f"[ITER {iteration}] EvalManager {split_name}: "
+            f"gaussians {metrics['num_gaussians']} | "
+            f"PSNR min {metrics['lowest_psnr']:.4f} "
             f"avg {metrics['average_psnr']:.4f} "
-            f"max {metrics['highest_psnr']:.4f}"
+            f"max {metrics['highest_psnr']:.4f} "            
+            f"| SSIM min {metrics['lowest_ssim']:.4f} "
+            f"avg {metrics['average_ssim']:.4f} "
+            f"max {metrics['highest_ssim']:.4f} "
+            f"| LPIPS min {metrics['lowest_lpips']:.4f} "
+            f"avg {metrics['average_lpips']:.4f} "
+            f"max {metrics['highest_lpips']:.4f}"
         )
         return metrics
 

@@ -138,7 +138,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 gaussian_batch = on_the_fly_obj.add_gaussians(viewpoint_cam)
                 if gaussian_batch is not None:
                     spawned_gaussians += gaussian_batch.means.shape[0]
-            print(f"gaussians spawned so far: {spawned_gaussians}")
 
         merged_batch = on_the_fly_obj.merge_gaussian_batches()
         if merged_batch is not None:
@@ -198,7 +197,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     eval_man = EvalManager(ep=evaluation_args, args=args, enabled=pipe.eval_wandb, name=pipe.wandb_name)
-    eval_man.set_initialization_time(initialization_time_sec)
+    eval_man.set_initialization_time(initialization_time_sec, num_gaussians=int(gaussians.get_xyz.shape[0]))
     eval_man.track_time()
     """ Prepare Diff-SPSR if enabled """
     if args.diff_spsr:
