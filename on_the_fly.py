@@ -118,6 +118,8 @@ class OnTheFly:
 
     @torch.no_grad()
     def generate_gaussians(self, depth_mask, prob_mask, sample_mask, image_mask, cam):
+        device = depth_mask.device
+
         # ++ means ++
         c2w = torch.linalg.inv(cam.extrinsics)
         c2w = c2w.T
@@ -149,7 +151,7 @@ class OnTheFly:
         cam_world = pre_intrinsics @ unproj
 
         # put reconstruction into world space
-        homo_ones = torch.ones((cam_world.shape[0], 1))
+        homo_ones = torch.ones((cam_world.shape[0], 1), device=device, dtype=cam_world.dtype)
         cam_world = torch.concatenate((cam_world, homo_ones), dim=1)
 
         world_points = cam_world @ c2w
@@ -166,11 +168,11 @@ class OnTheFly:
         scales = scales.repeat(1, 3)
 
         # ++ rotations ++
-        rots = torch.zeros((world_points.shape[0], 4), device="cuda")
+        rots = torch.zeros((world_points.shape[0], 4), device=device, dtype=torch.float32)
         rots[:, 0] = 1
 
         # ++ opacities ++
-        opacities = inverse_sigmoid(0.1 * torch.ones((world_points.shape[0], 1), dtype=torch.float, device="cuda"))
+        opacities = inverse_sigmoid(0.1 * torch.ones((world_points.shape[0], 1), dtype=torch.float32, device=device))
         prim_axis = -cam.get_primary_axis()
 
         # ++ normals ++
@@ -182,7 +184,11 @@ class OnTheFly:
         base_color = img.permute(1, 2, 0)[sample_mask]
 
         # ++ shs ++
-        shs = torch.zeros((base_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        shs = torch.zeros(
+            (base_color.shape[0], 3, (self.max_sh_degree + 1) ** 2),
+            dtype=torch.float32,
+            device=device,
+        )
         shs[:, :3, 0] = RGB2SH(base_color)
         shs[:, 3:, 1:] = 0.0
 

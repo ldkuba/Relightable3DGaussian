@@ -65,6 +65,7 @@ class DepthEstimator:
         self.p3ids = p3ids
         self.xyzs = xyzs
         self.key_points = key_points
+        self.image_sizes = self._build_image_sizes(scene_info)
         self.p3ids_torch = torch.as_tensor(self.p3ids, device=self.DEVICE, dtype=torch.long)
         self.xyzs_torch = torch.as_tensor(self.xyzs, device=self.DEVICE, dtype=torch.float32)
 
@@ -75,6 +76,14 @@ class DepthEstimator:
         # Depth-Anything-V2 normalization constants.
         self._dav2_mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32, device=self.DEVICE).view(1, 3, 1, 1)
         self._dav2_std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32, device=self.DEVICE).view(1, 3, 1, 1)
+
+    def _build_image_sizes(self, scene_info):
+        image_sizes = {}
+        if scene_info is None:
+            return image_sizes
+        for cam in scene_info.train_cameras + scene_info.test_cameras:
+            image_sizes[f"{cam.image_name}.png"] = (cam.width, cam.height)
+        return image_sizes
 
     def _compute_dav2_size(self, h, w):
         # Match DA-V2 Resize(keep_aspect_ratio=True, ensure_multiple_of=14, resize_method='lower_bound').
@@ -131,6 +140,16 @@ class DepthEstimator:
         matched_uv = uv[in_bounds][match]
         matched_xyz_idx = sort_idx[pos_in[match]]
         matched_xyz = self.xyzs_torch[matched_xyz_idx]
+
+        orig_size = self.image_sizes.get(f"{viewpoint_cam.image_name}.png")
+        if orig_size is not None:
+            orig_w, orig_h = orig_size
+            curr_w = viewpoint_cam.image_width
+            curr_h = viewpoint_cam.image_height
+            if orig_w > 0 and orig_h > 0 and (orig_w != curr_w or orig_h != curr_h):
+                scale = matched_uv.new_tensor([curr_w / float(orig_w), curr_h / float(orig_h)])
+                matched_uv = matched_uv * scale
+
         return matched_uv, matched_xyz
 
     def t(self, D):

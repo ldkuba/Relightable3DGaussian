@@ -12,6 +12,7 @@ class MaskSampler:
 
         self.scene_info = scene_info
         self.key_points_torch = key_points_torch
+        self.image_sizes = self._build_image_sizes(scene_info)
 
         self.width = width
         self.height = height
@@ -37,6 +38,36 @@ class MaskSampler:
         self.disc_kernel = self.disc_kernel.cuda() / self.disc_kernel.sum()
 
         self.feature_kernel = self._make_gaussian_kernel().to(self.DEVICE)
+
+    def _build_image_sizes(self, scene_info):
+        image_sizes = {}
+        if scene_info is None:
+            return image_sizes
+        for cam in scene_info.train_cameras + scene_info.test_cameras:
+            image_sizes[f"{cam.image_name}.png"] = (cam.width, cam.height)
+        return image_sizes
+
+    @torch.no_grad()
+    def get_key_points(self, viewpoint_cam):
+        key_points = self.key_points_torch.get(f"{viewpoint_cam.image_name}.png")
+        if key_points is None or key_points[0].numel() == 0:
+            empty_ids = torch.empty((0,), device=self.DEVICE, dtype=torch.long)
+            empty_uv = torch.empty((0, 2), device=self.DEVICE, dtype=torch.float32)
+            return empty_ids, empty_uv
+
+        key_ids, uv = key_points
+        orig_size = self.image_sizes.get(f"{viewpoint_cam.image_name}.png")
+        if orig_size is None:
+            return key_ids, uv
+
+        orig_w, orig_h = orig_size
+        curr_w = viewpoint_cam.image_width
+        curr_h = viewpoint_cam.image_height
+        if orig_w <= 0 or orig_h <= 0 or (orig_w == curr_w and orig_h == curr_h):
+            return key_ids, uv
+
+        scale = uv.new_tensor([curr_w / float(orig_w), curr_h / float(orig_h)])
+        return key_ids, uv * scale
 
     @torch.no_grad()
     def get_lapla_norm(self, img, kernel):
@@ -67,24 +98,26 @@ class MaskSampler:
         Returns a blurred feature support map in [0, 1], shape [H, W].
         High values mean: this pixel is near matched keypoints / SfM support.
         """
-        key_points = self.key_points_torch.get(f"{viewpoint_cam.image_name}.png")
-        if key_points is None or key_points[0].numel() == 0:
-            return torch.zeros((self.height, self.width), device=self.DEVICE)
+        _, uv = self.get_key_points(viewpoint_cam)
+        height = viewpoint_cam.image_height
+        width = viewpoint_cam.image_width
+        if uv.numel() == 0:
+            return torch.zeros((height, width), device=self.DEVICE)
 
-        uv = torch.round(key_points[1]).long()  # shape [N, 2], assumed (u, v)
+        uv = torch.round(uv).long()  # shape [N, 2], assumed (u, v)
 
         valid = (
             (uv[:, 0] >= 0)
-            & (uv[:, 0] < self.width)
+            & (uv[:, 0] < width)
             & (uv[:, 1] >= 0)
-            & (uv[:, 1] < self.height)
+            & (uv[:, 1] < height)
         )
         uv = uv[valid]
 
         if uv.numel() == 0:
-            return torch.zeros((self.height, self.width), device=self.DEVICE)
+            return torch.zeros((height, width), device=self.DEVICE)
 
-        feat_map = torch.zeros((1, 1, self.height, self.width), device=self.DEVICE)
+        feat_map = torch.zeros((1, 1, height, width), device=self.DEVICE)
         u = uv[:, 0]
         v = uv[:, 1]
 
