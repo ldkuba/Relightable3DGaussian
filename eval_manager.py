@@ -12,6 +12,8 @@ from lpipsPyTorch import lpips
 
 
 class EvalManager:
+    SSIM_LPIPS_MILESTONES = {500, 1000, 2000, 5000, 10000, 30000}
+
     def __init__(self, ep: EvalParams, args, enabled: bool, name: str = "OnTheFly"):
         self.ep = ep
         self.args = args
@@ -50,6 +52,9 @@ class EvalManager:
 
     def _needs_render_eval(self) -> bool:
         return self._should_log_psnr() or self._should_log_ssim() or self._should_log_lpips()
+
+    def _should_log_ssim_lpips_at_iteration(self, iteration: int) -> bool:
+        return iteration in self.SSIM_LPIPS_MILESTONES
 
     def track_time(self):
         if self._tracked_since is None:
@@ -150,9 +155,9 @@ class EvalManager:
                         gt_image = torch.clamp(viewpoint.original_image.to(image.device), 0.0, 1.0)
                         if self._should_log_psnr():
                             psnr_values.append(psnr(image, gt_image).mean().detach().double().cpu())
-                        if self._should_log_ssim():
+                        if self._should_log_ssim() and self._should_log_ssim_lpips_at_iteration(iteration):
                             ssim_values.append(ssim(image, gt_image).mean().detach().double().cpu())
-                        if self._should_log_lpips():
+                        if self._should_log_lpips() and self._should_log_ssim_lpips_at_iteration(iteration):
                             lpips_values.append(lpips(image, gt_image, net_type='vgg').mean().detach().double().cpu())
                         rendered_any = True
             finally:
@@ -163,12 +168,12 @@ class EvalManager:
                 metrics["lowest_psnr"] = psnr_values.min().item()
                 metrics["highest_psnr"] = psnr_values.max().item()
                 metrics["average_psnr"] = psnr_values.mean().item()
-            if self._should_log_ssim():
+            if self._should_log_ssim() and self._should_log_ssim_lpips_at_iteration(iteration):
                 ssim_values = torch.stack(ssim_values)
                 metrics["lowest_ssim"] = ssim_values.min().item()
                 metrics["highest_ssim"] = ssim_values.max().item()
                 metrics["average_ssim"] = ssim_values.mean().item()
-            if self._should_log_lpips():
+            if self._should_log_lpips() and self._should_log_ssim_lpips_at_iteration(iteration):
                 lpips_values = torch.stack(lpips_values)
                 metrics["lowest_lpips"] = lpips_values.min().item()
                 metrics["highest_lpips"] = lpips_values.max().item()
@@ -188,11 +193,11 @@ class EvalManager:
             summary_parts.append(
                 f"PSNR min {metrics['lowest_psnr']:.4f} avg {metrics['average_psnr']:.4f} max {metrics['highest_psnr']:.4f}"
             )
-        if self._should_log_ssim():
+        if "lowest_ssim" in metrics:
             summary_parts.append(
                 f"SSIM min {metrics['lowest_ssim']:.4f} avg {metrics['average_ssim']:.4f} max {metrics['highest_ssim']:.4f}"
             )
-        if self._should_log_lpips():
+        if "lowest_lpips" in metrics:
             summary_parts.append(
                 f"LPIPS min {metrics['lowest_lpips']:.4f} avg {metrics['average_lpips']:.4f} max {metrics['highest_lpips']:.4f}"
             )
